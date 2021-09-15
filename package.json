@@ -60,7 +60,7 @@
     "rechoir": "0.7.0",
     "resolve-from": "^5.0.0",
     "tarn": "^3.0.1",
-    "tildify": "2.0.0"
+    "tildify": "3.0.0"
   },
   "peerDependenciesMeta": {
     "tedious": {
