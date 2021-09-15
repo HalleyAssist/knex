@@ -10,16 +10,28 @@ const rimraf = require('rimraf');
 const knexLib = require('../../../knex');
 const logger = require('../logger');
 const config = require('../../knexfile');
-const delay = require('../../../lib/util/delay');
+const delay = require('../../../lib/execution/internal/delay');
 const _ = require('lodash');
 const testMemoryMigrations = require('./memory-migrations');
+const {
+  isPostgreSQL,
+  isOracle,
+  isMssql,
+  isMysql,
+  isSQLite,
+  isRedshift,
+} = require('../../util/db-helpers');
 
 module.exports = function (knex) {
-  require('rimraf').sync(path.join(__dirname, './migration'));
+  rimraf.sync(path.join(__dirname, './migration'));
 
-  before(function () {
+  before(async () => {
     // make sure lock was not left from previous failed test run
-    return knex.migrate.forceFreeMigrationsLock({
+    await knex.schema.dropTableIfExists('knex_migrations');
+    await knex.schema.dropTableIfExists('migration_test_1');
+    await knex.schema.dropTableIfExists('migration_test_2');
+    await knex.schema.dropTableIfExists('migration_test_2_1');
+    await knex.migrate.forceFreeMigrationsLock({
       directory: 'test/integration/migrate/test',
     });
   });
@@ -58,7 +70,7 @@ module.exports = function (knex) {
         });
     });
 
-    if (knex.client.driverName === 'pg') {
+    if (isPostgreSQL(knex)) {
       it('should not fail drop-and-recreate-column operation when using promise chain and schema', () => {
         return knex.migrate
           .latest({
@@ -73,7 +85,7 @@ module.exports = function (knex) {
       });
     }
 
-    if (knex.client.driverName === 'sqlite3') {
+    if (isSQLite(knex)) {
       it('should not fail rename-and-drop-column with multiline sql from legacy db', async () => {
         const knexConfig = _.extend({}, config.sqlite3, {
           connection: {
@@ -84,11 +96,12 @@ module.exports = function (knex) {
               'test/integration/migrate/rename-and-drop-column-with-multiline-sql-from-legacy-db',
           },
         });
-
-        const db = logger(knexLib(knexConfig));
+        const knexInstance = knexLib(knexConfig);
+        const db = logger(knexInstance);
 
         await db.migrate.latest();
         await db.migrate.rollback();
+        await knexInstance.destroy();
       });
     }
 
@@ -104,7 +117,7 @@ module.exports = function (knex) {
         });
     });
 
-    if (knex.client.driverName === 'pg') {
+    if (isPostgreSQL(knex)) {
       it('should not fail drop-and-recreate-column operation when using async/await and schema', () => {
         return knex.migrate
           .latest({
@@ -189,8 +202,8 @@ module.exports = function (knex) {
           });
       });
 
-      it('should return a positive number if the DB is ahead', function () {
-        return Promise.all([
+      it('should return a positive number if the DB is ahead', async () => {
+        const [migration1, migration2, migration3] = await Promise.all([
           knex('knex_migrations').returning('id').insert({
             name: 'foobar',
             batch: 5,
@@ -206,26 +219,25 @@ module.exports = function (knex) {
             batch: 6,
             migration_time: new Date(),
           }),
-        ]).then(([migration1, migration2, migration3]) => {
-          return knex.migrate
-            .status({ directory: 'test/integration/migrate/test' })
-            .then(function (migrationLevel) {
-              expect(migrationLevel).to.equal(3);
-            })
-            .then(function () {
-              // Cleanup the added migrations
-              if (/redshift/.test(knex.client.driverName)) {
-                return knex('knex_migrations')
-                  .where('name', 'like', '%foobar%')
-                  .del();
-              }
+        ]);
+        return knex.migrate
+          .status({ directory: 'test/integration/migrate/test' })
+          .then(function (migrationLevel) {
+            expect(migrationLevel).to.equal(3);
+          })
+          .then(function () {
+            // Cleanup the added migrations
+            if (isRedshift(knex)) {
               return knex('knex_migrations')
-                .where('id', migration1[0])
-                .orWhere('id', migration2[0])
-                .orWhere('id', migration3[0])
+                .where('name', 'like', '%foobar%')
                 .del();
-            });
-        });
+            }
+            return knex('knex_migrations')
+              .where('id', migration1[0])
+              .orWhere('id', migration2[0])
+              .orWhere('id', migration3[0])
+              .del();
+          });
       });
     });
 
@@ -271,7 +283,7 @@ module.exports = function (knex) {
       });
 
       it('should work with concurent calls to _lockMigrations', async function () {
-        if (knex.client.driverName == 'sqlite3') {
+        if (isSQLite(knex)) {
           // sqlite doesn't support concurrency
           this.skip();
           return;
@@ -369,7 +381,7 @@ module.exports = function (knex) {
       });
 
       it('should run the migrations from oldest to newest', function () {
-        if (knex.client.driverName === 'oracledb') {
+        if (isOracle(knex)) {
           return knex('knex_migrations')
             .orderBy('migration_time', 'asc')
             .select('*')
@@ -660,71 +672,132 @@ module.exports = function (knex) {
           directory: 'test/integration/migrate/drop-with-default-constraint',
         });
       });
+
+      describe('with transactions disabled', () => {
+        beforeEach(async () => {
+          await knex.migrate.up({
+            directory:
+              'test/integration/migrate/test_single_per_migration_trx_disabled',
+            name: 'create_table.js',
+          });
+          await knex.table('test_transactions').insert({ value: 0 });
+        });
+
+        afterEach(async () => {
+          await knex.migrate.rollback(
+            {
+              directory:
+                'test/integration/migrate/test_single_per_migration_trx_disabled',
+            },
+            true
+          );
+        });
+
+        it('should partially run', async () => {
+          await expect(
+            knex.migrate.up({
+              directory:
+                'test/integration/migrate/test_single_per_migration_trx_disabled',
+              name: 'up.js',
+            })
+          ).to.eventually.be.rejected;
+          const { value } = await knex
+            .table('test_transactions')
+            .select('value')
+            .first();
+          expect(value).to.equal(1); // updated by migration before error
+        });
+      });
     });
 
     describe('knex.migrate.down', () => {
-      beforeEach(() => {
-        return knex.migrate.latest({
-          directory: ['test/integration/migrate/test'],
+      describe('with transactions enabled', () => {
+        beforeEach(async () => {
+          await knex.migrate.latest({
+            directory: ['test/integration/migrate/test'],
+          });
+        });
+
+        afterEach(async () => {
+          await knex.migrate.rollback(
+            { directory: ['test/integration/migrate/test'] },
+            true
+          );
+        });
+
+        it('should only undo the last migration that was run if all migrations have run', async () => {
+          await knex.migrate.down({
+            directory: ['test/integration/migrate/test'],
+          });
+          const data = await knex('knex_migrations').select('*');
+          expect(data).to.have.length(1);
+          expect(path.basename(data[0].name)).to.equal(
+            '20131019235242_migration_1.js'
+          );
+        });
+
+        it('should only undo the last migration that was run if there are other migrations that have not yet run', async () => {
+          await knex.migrate.down({
+            directory: ['test/integration/migrate/test'],
+          });
+          await knex.migrate.down({
+            directory: ['test/integration/migrate/test'],
+          });
+          const data = await knex('knex_migrations').select('*');
+          expect(data).to.have.length(0);
+        });
+
+        it('should not error if all migrations have already been undone', async () => {
+          await knex.migrate.rollback(
+            { directory: ['test/integration/migrate/test'] },
+            true
+          );
+          const data = await knex.migrate.down({
+            directory: ['test/integration/migrate/test'],
+          });
+          expect(data).to.be.an('array');
         });
       });
 
-      afterEach(() => {
-        return knex.migrate.rollback(
-          { directory: ['test/integration/migrate/test'] },
-          true
-        );
-      });
-
-      it('should only undo the last migration that was run if all migrations have run', function () {
-        return knex.migrate
-          .down({
-            directory: ['test/integration/migrate/test'],
-          })
-          .then(() => {
-            return knex('knex_migrations')
-              .select('*')
-              .then((data) => {
-                expect(data).to.have.length(1);
-                expect(path.basename(data[0].name)).to.equal(
-                  '20131019235242_migration_1.js'
-                );
-              });
+      describe('with transactions disabled', () => {
+        beforeEach(async () => {
+          await knex.migrate.up({
+            directory:
+              'test/integration/migrate/test_single_per_migration_trx_disabled',
+            name: 'create_table.js',
           });
-      });
+          await knex.table('test_transactions').insert({ value: 0 });
+        });
 
-      it('should only undo the last migration that was run if there are other migrations that have not yet run', function () {
-        return knex.migrate
-          .down({
-            directory: ['test/integration/migrate/test'],
-          })
-          .then(() => {
-            return knex.migrate
-              .down({
-                directory: ['test/integration/migrate/test'],
-              })
-              .then(() => {
-                return knex('knex_migrations')
-                  .select('*')
-                  .then((data) => {
-                    expect(data).to.have.length(0);
-                  });
-              });
-          });
-      });
+        afterEach(async () => {
+          await knex.migrate.rollback(
+            {
+              directory:
+                'test/integration/migrate/test_single_per_migration_trx_disabled/rollback',
+            },
+            true
+          );
+        });
 
-      it('should not error if all migrations have already been undone', function () {
-        return knex.migrate
-          .rollback({ directory: ['test/integration/migrate/test'] }, true)
-          .then(() => {
-            return knex.migrate
-              .down({
-                directory: ['test/integration/migrate/test'],
-              })
-              .then((data) => {
-                expect(data).to.be.an('array');
-              });
+        it('should partially run', async () => {
+          await knex.migrate.up({
+            directory:
+              'test/integration/migrate/test_single_per_migration_trx_disabled',
+            name: 'down.js',
           });
+          await expect(
+            knex.migrate.down({
+              directory:
+                'test/integration/migrate/test_single_per_migration_trx_disabled',
+              name: 'down.js',
+            })
+          ).to.eventually.be.rejected;
+          const { value } = await knex
+            .table('test_transactions')
+            .select('value')
+            .first();
+          expect(value).to.equal(-1); // updated by migration before error
+        });
       });
     });
 
@@ -740,7 +813,7 @@ module.exports = function (knex) {
       });
     });
 
-    if (knex.client.driverName === 'pg' || knex.client.driverName === 'mssql') {
+    if (isPostgreSQL(knex) || isMssql(knex)) {
       it('is able to run two migrations in parallel (if no implicit DDL commits)', function () {
         return Promise.all([
           knex.migrate.latest({ directory: 'test/integration/migrate/test' }),
@@ -880,11 +953,7 @@ module.exports = function (knex) {
             // MySQL / Oracle commit transactions implicit for most common
             // migration statements (e.g. CREATE TABLE, ALTER TABLE, DROP TABLE),
             // so we need to check for dialect
-            if (
-              knex.client.driverName === 'mysql' ||
-              knex.client.driverName === 'mysql2' ||
-              knex.client.driverName === 'oracledb'
-            ) {
+            if (isMysql(knex) || isOracle(knex)) {
               expect(exists).to.equal(true);
             } else {
               expect(exists).to.equal(false);
@@ -899,7 +968,7 @@ module.exports = function (knex) {
       });
     });
 
-    if (knex.client.driverName === 'pg') {
+    if (isPostgreSQL(knex)) {
       describe('knex.migrate.latest with specific changelog schema', function () {
         before(() => {
           return knex.raw(`CREATE SCHEMA IF NOT EXISTS "testschema"`);
@@ -991,12 +1060,13 @@ module.exports = function (knex) {
     const migrations = {
       migration1: {
         up(knex) {
-          return knex.schema.createTable('migration_source_test_1', function (
-            t
-          ) {
-            t.increments();
-            t.string('name');
-          });
+          return knex.schema.createTable(
+            'migration_source_test_1',
+            function (t) {
+              t.increments();
+              t.string('name');
+            }
+          );
         },
         down(knex) {
           return knex.schema.dropTable('migration_source_test_1');

@@ -1,6 +1,7 @@
 'use strict';
 
 const { expect } = require('chai');
+const { isOracle } = require('../util/db-helpers');
 
 module.exports = function (knex) {
   const sinon = require('sinon');
@@ -13,19 +14,30 @@ module.exports = function (knex) {
       return knex.destroy();
     });
 
+    if (isOracle(knex)) {
+      describe('Oracledb driver tests', function () {
+        this.timeout(process.env.KNEX_TEST_TIMEOUT || 5000);
+        require('./dialects/oracledb');
+      });
+    }
+
     require('./schema')(knex);
+    require('./schema/foreign-keys')(knex);
     require('./migrate/migration-integration-tests')(knex);
 
     require('./seed')(knex);
-    require('./builder/inserts')(knex);
-    require('./builder/selects')(knex);
-    require('./builder/unions')(knex);
-    require('./builder/joins')(knex);
-    require('./builder/aggregate')(knex);
-    require('./builder/updates')(knex);
-    require('./builder/transaction')(knex);
-    require('./builder/deletes')(knex);
-    require('./builder/additional')(knex);
+    require('./query/inserts')(knex);
+    require('./query/selects')(knex);
+    require('./query/unions')(knex);
+    require('./query/joins')(knex);
+    require('./query/aggregate')(knex);
+    require('./query/updates')(knex);
+    require('./execution/transaction')(knex);
+    require('./query/deletes')(knex);
+    require('./query/trigger-inserts')(knex);
+    require('./query/trigger-updates')(knex);
+    require('./query/trigger-deletes')(knex);
+    require('./query/additional')(knex);
     require('./datatype/bigint')(knex);
     require('./datatype/decimal')(knex);
     require('./datatype/double')(knex);
