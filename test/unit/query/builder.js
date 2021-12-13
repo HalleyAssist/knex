@@ -5625,6 +5625,84 @@ describe('QueryBuilder', () => {
     );
   });
 
+  it('order by, null first', () => {
+    testsql(qb().from('users').orderBy('foo', 'desc', 'first'), {
+      mysql: {
+        sql: 'select * from `users` order by (`foo` is not null) desc',
+      },
+      mssql: {
+        sql: 'select * from [users] order by IIF([foo] is null,0,1) desc',
+      },
+      pg: {
+        sql: 'select * from "users" order by ("foo" is not null) desc',
+      },
+      'pg-redshift': {
+        sql: 'select * from "users" order by ("foo" is not null) desc',
+      },
+    });
+  });
+
+  it('order by, null first, array notation', () => {
+    testsql(
+      qb()
+        .from('users')
+        .orderBy([{ column: 'foo', order: 'desc', nulls: 'first' }]),
+      {
+        mysql: {
+          sql: 'select * from `users` order by (`foo` is not null) desc',
+        },
+        mssql: {
+          sql: 'select * from [users] order by IIF([foo] is null,0,1) desc',
+        },
+        pg: {
+          sql: 'select * from "users" order by ("foo" is not null) desc',
+        },
+        'pg-redshift': {
+          sql: 'select * from "users" order by ("foo" is not null) desc',
+        },
+      }
+    );
+  });
+
+  it('order by, null last', () => {
+    testsql(qb().from('users').orderBy('foo', 'desc', 'last'), {
+      mysql: {
+        sql: 'select * from `users` order by (`foo` is null) desc',
+      },
+      mssql: {
+        sql: 'select * from [users] order by IIF([foo] is null,1,0) desc',
+      },
+      pg: {
+        sql: 'select * from "users" order by ("foo" is null) desc',
+      },
+      'pg-redshift': {
+        sql: 'select * from "users" order by ("foo" is null) desc',
+      },
+    });
+  });
+
+  it('order by, null last, array notation', () => {
+    testsql(
+      qb()
+        .from('users')
+        .orderBy([{ column: 'foo', order: 'desc', nulls: 'last' }]),
+      {
+        mysql: {
+          sql: 'select * from `users` order by (`foo` is null) desc',
+        },
+        mssql: {
+          sql: 'select * from [users] order by IIF([foo] is null,1,0) desc',
+        },
+        pg: {
+          sql: 'select * from "users" order by ("foo" is null) desc',
+        },
+        'pg-redshift': {
+          sql: 'select * from "users" order by ("foo" is null) desc',
+        },
+      }
+    );
+  });
+
   it('update method with joins mysql', () => {
     testsql(
       qb()
@@ -6424,6 +6502,27 @@ describe('QueryBuilder', () => {
       },
       mssql: {
         sql: 'select * from [foo] with (HOLDLOCK) where [bar] = ?',
+        bindings: ['baz'],
+      },
+    });
+  });
+
+  it('lock for no key update', () => {
+    testsql(
+      qb().select('*').from('foo').where('bar', '=', 'baz').forNoKeyUpdate(),
+      {
+        pg: {
+          sql: 'select * from "foo" where "bar" = ? for no key update',
+          bindings: ['baz'],
+        },
+      }
+    );
+  });
+
+  it('lock for key share', () => {
+    testsql(qb().select('*').from('foo').where('bar', '=', 'baz').forShare(), {
+      pg: {
+        sql: 'select * from "foo" where "bar" = ? for share',
         bindings: ['baz'],
       },
     });
@@ -9994,31 +10093,31 @@ describe('QueryBuilder', () => {
         .del()
         .from('users')
         .join('photos', 'photos.id', 'users.id')
-        .where({ 'user.email': 'mock@test.com' }),
+        .where({ 'user.email': 'mock@example.com' }),
       {
         mysql: {
           sql: 'delete `users` from `users` inner join `photos` on `photos`.`id` = `users`.`id` where `user`.`email` = ?',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
         mssql: {
           sql: 'delete [users] from [users] inner join [photos] on [photos].[id] = [users].[id] where [user].[email] = ?;select @@rowcount',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
         oracledb: {
           sql: 'delete "users" from "users" inner join "photos" on "photos"."id" = "users"."id" where "user"."email" = ?',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
         pg: {
           sql: 'delete "users" from "users" inner join "photos" on "photos"."id" = "users"."id" where "user"."email" = ?',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
         'pg-redshift': {
           sql: 'delete "users" from "users" inner join "photos" on "photos"."id" = "users"."id" where "user"."email" = ?',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
         sqlite3: {
           sql: 'delete `users` from `users` inner join `photos` on `photos`.`id` = `users`.`id` where `user`.`email` = ?',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
       }
     );
@@ -10030,11 +10129,11 @@ describe('QueryBuilder', () => {
         .del('*', triggerOptions)
         .from('users')
         .join('photos', 'photos.id', 'users.id')
-        .where({ 'user.email': 'mock@test.com' }),
+        .where({ 'user.email': 'mock@example.com' }),
       {
         mssql: {
           sql: 'select top(0) [t].* into #out from [users] as t left join [users] on 0=1;delete [users] output deleted.* into #out from [users] inner join [photos] on [photos].[id] = [users].[id] where [user].[email] = ?; select * from #out; drop table #out;',
-          bindings: ['mock@test.com'],
+          bindings: ['mock@example.com'],
         },
       }
     );
