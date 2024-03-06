@@ -1,6 +1,7 @@
 /*eslint no-var:0, max-len:0 */
 'use strict';
 
+const util = require('util');
 const chai = require('chai');
 chai.use(require('chai-as-promised'));
 chai.use(require('sinon-chai'));
@@ -34,6 +35,7 @@ const {
 const logger = require('../../../integration/logger');
 const { insertAccounts } = require('../../../util/dataInsertHelper');
 const sinon = require('sinon');
+const { setHiddenProperty } = require('../../../../lib/util/security');
 
 describe('Additional', function () {
   getAllDbs().forEach((db) => {
@@ -51,11 +53,6 @@ describe('Additional', function () {
         await dropTables(knex);
         await createAccounts(knex, false, false);
         await createTestTableTwo(knex);
-      });
-
-      beforeEach(async () => {
-        await knex('accounts').truncate();
-        await insertAccounts(knex);
       });
 
       after(async () => {
@@ -77,87 +74,119 @@ describe('Additional', function () {
           knex.client.config.postProcessResponse = null;
         });
 
-        it('should process normal response', () => {
-          return knex('accounts')
-            .limit(1)
-            .then((res) => {
-              expect(res.callCount).to.equal(1);
-            });
+        it('should process normal response', async () => {
+          const res = await knex('accounts').limit(1);
+          expect(res.callCount).to.equal(1);
         });
 
-        it('should pass query context to the custom handler', () => {
-          return knex('accounts')
+        it('should pass query context to the custom handler', async () => {
+          const res = await knex('accounts')
             .queryContext('the context')
-            .limit(1)
-            .then((res) => {
-              expect(res.queryContext).to.equal('the context');
-            });
+            .limit(1);
+          expect(res.queryContext).to.equal('the context');
         });
 
-        it('should process raw response', () => {
-          return knex.raw('select * from ??', ['accounts']).then((res) => {
-            expect(res.callCount).to.equal(1);
-          });
+        it('should process raw response', async () => {
+          const res = await knex.raw('select * from ??', ['accounts']);
+          expect(res.callCount).to.equal(1);
         });
 
-        it('should pass query context for raw responses', () => {
-          return knex
+        it('should pass query context for raw responses', async () => {
+          const res = await knex
             .raw('select * from ??', ['accounts'])
-            .queryContext('the context')
-            .then((res) => {
-              expect(res.queryContext).to.equal('the context');
-            });
+            .queryContext('the context');
+          expect(res.queryContext).to.equal('the context');
         });
 
-        it('should process response done in transaction', () => {
-          return knex
-            .transaction((trx) => {
-              return trx('accounts')
-                .limit(1)
-                .then((res) => {
-                  expect(res.callCount).to.equal(1);
-                  return res;
-                });
-            })
-            .then((res) => {
-              expect(res.callCount).to.equal(1);
-            });
+        it('should process response done in transaction', async () => {
+          const res = await knex.transaction((trx) => {
+            return trx('accounts')
+              .limit(1)
+              .then((res) => {
+                expect(res.callCount).to.equal(1);
+                return res;
+              });
+          });
+          expect(res.callCount).to.equal(1);
         });
 
-        it('should pass query context for responses from transactions', () => {
-          return knex
-            .transaction((trx) => {
-              return trx('accounts')
-                .queryContext('the context')
-                .limit(1)
-                .then((res) => {
-                  expect(res.queryContext).to.equal('the context');
-                  return res;
-                });
-            })
-            .then((res) => {
-              expect(res.queryContext).to.equal('the context');
-            });
+        it('should pass query context for responses from transactions', async () => {
+          const res = await knex.transaction((trx) => {
+            return trx('accounts')
+              .queryContext('the context')
+              .limit(1)
+              .then((res) => {
+                expect(res.queryContext).to.equal('the context');
+                return res;
+              });
+          });
+          expect(res.queryContext).to.equal('the context');
         });
 
-        it('should handle error correctly in a stream', (done) => {
+        it('should emit error events when a stream query fails', (done) => {
           const stream = knex('wrongtable').limit(1).stream();
           stream.on('error', () => {
             done();
           });
         });
 
-        it('should process response done through a stream', (done) => {
-          let response;
-          const stream = knex('accounts').limit(1).stream();
+        it('should release the connection when a stream query iteration errors', async function () {
+          const spy = sinon.spy(knex.client, 'releaseConnection');
 
-          stream.on('data', (res) => {
-            response = res;
+          const stream = knex.raw('VALUES (1), (2), (3)').stream();
+          try {
+            // eslint-disable-next-line no-unused-vars
+            for await (const _ of stream) {
+              throw new Error('boom');
+            }
+            // eslint-disable-next-line no-empty
+          } catch (e) {}
+
+          await new Promise((res) => setTimeout(res, 50));
+
+          expect(spy).to.have.been.called;
+          spy.restore();
+        });
+
+        it('should close the db connection when prematurely closing a stream', async function () {
+          await knex('accounts').truncate();
+          await insertAccounts(knex, 'accounts');
+
+          // We limit to only one row at a time, to keep the cursor open
+          const stream = knex('accounts').stream({ highWaterMark: 1 });
+
+          // eslint-disable-next-line no-unused-vars
+          for await (const _ of stream) {
+            stream.destroy();
+            break;
+          }
+
+          await new Promise((res) => setTimeout(res, 50));
+
+          // Will timeout if the connection is in the pool, but not closed
+          this.timeout(1000);
+          await knex('accounts').limit(1);
+        });
+
+        it('should process response done through a stream', async () => {
+          await knex('accounts').truncate();
+          await insertAccounts(knex, 'accounts');
+          let response;
+          let count = 0;
+          const stream = knex('accounts').limit(1).stream();
+          // Need to promise the stream to await it
+          await new Promise((done) => {
+            stream.on('data', (res) => {
+              count++;
+              response = res;
+            });
+            stream.on('finish', () => {
+              count++;
+              expect(response.callCount).to.equal(1);
+              done();
+            });
           });
-          stream.on('finish', () => {
-            expect(response.callCount).to.equal(1);
-            done();
-          });
+          expect(count).to.equal(2);
         });
 
         it('should pass query context for responses through a stream', (done) => {
@@ -205,38 +234,29 @@ describe('Additional', function () {
           knex.client.config.wrapIdentifier = null;
         });
 
-        it('should work using camelCased table name', () => {
-          return knex('testTableTwo')
-            .columnInfo()
-            .then((res) => {
-              expect(Object.keys(res)).to.have.all.members([
-                'id',
-                'accountId',
-                'details',
-                'status',
-              ]);
-            });
+        it('should work using camelCased table name', async () => {
+          const res = await knex('testTableTwo').columnInfo();
+          expect(Object.keys(res)).to.have.all.members([
+            'id',
+            'accountId',
+            'details',
+            'status',
+          ]);
         });
 
-        it('should work using snake_cased table name', () => {
-          return knex('test_table_two')
-            .columnInfo()
-            .then((res) => {
-              expect(Object.keys(res)).to.have.all.members([
-                'id',
-                'accountId',
-                'details',
-                'status',
-              ]);
-            });
+        it('should work using snake_cased table name', async () => {
+          const res = await knex('test_table_two').columnInfo();
+          expect(Object.keys(res)).to.have.all.members([
+            'id',
+            'accountId',
+            'details',
+            'status',
+          ]);
         });
       });
 
       describe('returning with wrapIdentifier and postProcessResponse` (TODO: fix to work on all possible dialects)', function () {
         const origHooks = {};
-        if (!isPostgreSQL(knex) || !isMssql(knex)) {
-          return;
-        }
 
         before('setup custom hooks', () => {
           origHooks.postProcessResponse =
@@ -272,30 +292,37 @@ describe('Additional', function () {
           knex.client.config.wrapIdentifier = origHooks.wrapIdentifier;
         });
 
-        it('should return the correct column when a single property is given to returning', () => {
-          return knex('accounts_foo')
+        it('should return the correct column when a single property is given to returning', async function () {
+          if (!isPostgreSQL(knex) && !isMssql(knex) && !isSQLite(knex)) {
+            return this.skip();
+          }
+
+          const res = await knex('accounts_foo')
             .insert({ balance_foo: 123 })
-            .returning('balance_foo')
-            .then((res) => {
-              expect(res).to.eql([123]);
-            });
+            .returning('balance_foo');
+          expect(res).to.eql([
+            {
+              balance_foo: 123,
+            },
+          ]);
         });
 
-        it('should return the correct columns when multiple properties are given to returning', () => {
-          return knex('accounts_foo')
+        it('should return the correct columns when multiple properties are given to returning', async function () {
+          if (!isPostgreSQL(knex) && !isMssql(knex) && !isSQLite(knex)) {
+            return this.skip();
+          }
+
+          const res = await knex('accounts_foo')
             .insert({ balance_foo: 123, email_foo: 'foo@bar.com' })
-            .returning(['balance_foo', 'email_foo'])
-            .then((res) => {
-              expect(res).to.eql([
-                { balance_foo: 123, email_foo: 'foo@bar.com' },
-              ]);
-            });
+            .returning(['balance_foo', 'email_foo']);
+
+          expect(res).to.eql([{ balance_foo: 123, email_foo: 'foo@bar.com' }]);
         });
       });
 
       describe('other operations', () => {
-        it('should truncate a table with truncate', function () {
-          return knex('test_table_two')
+        it('should truncate a table with truncate', async function () {
+          await knex('test_table_two')
             .truncate()
             .testSql(function (tester) {
               tester('mysql', 'truncate `test_table_two`');
@@ -305,40 +332,28 @@ describe('Additional', function () {
               tester('sqlite3', 'delete from `test_table_two`');
               tester('oracledb', 'truncate table "test_table_two"');
               tester('mssql', 'truncate table [test_table_two]');
-            })
-            .then(() => {
-              return knex('test_table_two')
-                .select('*')
-                .then((resp) => {
-                  expect(resp).to.have.length(0);
-                });
-            })
-            .then(() => {
-              // Insert new data after truncate and make sure ids restart at 1.
-              // This doesn't currently work on oracle, where the created sequence
-              // needs to be manually reset.
-              // On redshift, one would need to create an entirely new table and do
-              //  `insert into ... (select ...); alter table rename...`
-              if (isOracle(knex) || isRedshift(knex)) {
-                return;
-              }
-              return knex('test_table_two')
-                .insert({ status: 1 })
-                .then((res) => {
-                  return knex('test_table_two')
-                    .select('id')
-                    .first()
-                    .then((res) => {
-                      expect(res).to.be.an('object');
-                      if (!isCockroachDB(knex)) {
-                        expect(res.id).to.equal(1);
-                      }
-                    });
-                });
             });
+
+          const resp = await knex('test_table_two').select('*');
+          expect(resp).to.have.length(0);
+
+          // Insert new data after truncate and make sure ids restart at 1.
+          // This doesn't currently work on oracle, where the created sequence
+          // needs to be manually reset.
+          // On redshift, one would need to create an entirely new table and do
+          //  `insert into ... (select ...); alter table rename...`
+          if (isOracle(knex) || isRedshift(knex)) {
+            return;
+          }
+          await knex('test_table_two').insert({ status: 1 });
+          const res = await knex('test_table_two').select('id').first();
+          expect(res).to.be.an('object');
+          if (!isCockroachDB(knex)) {
+            expect(res.id).to.equal(1);
+          }
         });
 
-        it('should allow raw queries directly with `knex.raw`', function () {
+        it('should allow raw queries directly with `knex.raw`', async function () {
           const tables = {
             [drivers.MySQL]: 'SHOW TABLES',
             [drivers.MySQL2]: 'SHOW TABLES',
@@ -350,13 +365,15 @@ describe('Additional', function () {
               "SELECT table_name FROM information_schema.tables WHERE table_schema='public'",
             [drivers.Redshift]:
               "SELECT table_name FROM information_schema.tables WHERE table_schema='public'",
+            [drivers.BetterSQLite3]:
+              "SELECT name FROM sqlite_master WHERE type='table';",
             [drivers.SQLite]:
               "SELECT name FROM sqlite_master WHERE type='table';",
             [drivers.Oracle]: 'select TABLE_NAME from USER_TABLES',
             [drivers.MsSQL]:
               "SELECT table_name FROM INFORMATION_SCHEMA.TABLES WHERE table_schema='dbo'",
           };
-          return knex
+          await knex
             .raw(tables[knex.client.driverName])
             .testSql(function (tester) {
               tester(knex.client.driverName, tables[knex.client.driverName]);
@@ -375,52 +392,182 @@ describe('Additional', function () {
           expect(knex.fn.now(6).toQuery()).to.equal('CURRENT_TIMESTAMP(6)');
         });
 
-        it('#2184 - should properly escape table name for SQLite columnInfo', function () {
+        it('should allow using .fn.uuid to create raw statements', function () {
+          const expectedStatement = {
+            [drivers.MsSQL]: '(NEWID())',
+            [drivers.MySQL]: '(UUID())',
+            [drivers.MySQL2]: '(UUID())',
+            [drivers.Oracle]: '(random_uuid())',
+            oracle: '(random_uuid())',
+            [drivers.PostgreSQL]: '(gen_random_uuid())',
+            [drivers.PgNative]: '(gen_random_uuid())',
+            [drivers.SQLite]:
+              "(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))))",
+            [drivers.CockroachDB]: '(gen_random_uuid())',
+            [drivers.BetterSQLite3]:
+              "(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))))",
+          };
+
+          expect(knex.fn.uuid().prototype === knex.raw().prototype);
+
+          if (isRedshift()) {
+            expect(() => knex.fn.uuid().toQuery()).to.throw(
+              `${knex.client.driverName} does not have a uuid function`
+            );
+          } else {
+            expect(knex.fn.uuid().toQuery()).to.equal(
+              expectedStatement[knex.client.driverName]
+            );
+          }
+        });
+
+        it('should allow using .fn-methods to generate a uuid with select', async function () {
+          const uuid = await knex.select(knex.raw(knex.fn.uuid() + ' as uuid'));
+          expect(uuid[0].uuid).to.match(
+            /^[0-9A-F]{8}-[0-9A-F]{4}-[1-5][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/i
+          );
+        });
+
+        it('should allow using .fn-methods to be a default value', async function () {
+          await knex.schema.dropTableIfExists('default_uuid_table');
+          await knex.schema.createTable('default_uuid_table', (t) => {
+            t.uuid('uuid').defaultTo(knex.fn.uuid());
+          });
+          await knex('default_uuid_table').insert({});
+          const uuid = await knex('default_uuid_table').select('uuid');
+          expect(uuid[0].uuid).to.match(
+            /^[0-9A-F]{8}-[0-9A-F]{4}-[1-5][0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/i
+          );
+        });
+
+        it('should allow using .fn-methods to convert uuid to binary', function () {
+          const originalUuid = '6c825dc9-c98f-37ab-b01b-416294811a84';
+          const binary = knex.fn.uuidToBin(originalUuid);
+          const uuid = knex.fn.binToUuid(binary);
+          expect(uuid).to.equal(originalUuid);
+          const binaryUnorder = knex.fn.uuidToBin(originalUuid, false);
+          const uuidUnorder = knex.fn.binToUuid(binaryUnorder, false);
+          expect(uuidUnorder).to.equal(originalUuid);
+        });
+
+        it('should insert binary uuid and retrieve it with not ordered uuid data', async () => {
+          await knex.schema.dropTableIfExists('uuid_table');
+          await knex.schema.createTable('uuid_table', (t) => {
+            t.uuid('uuid_col_binary', { useBinaryUuid: true });
+          });
+          const originalUuid = '3f06af63-a93c-11e4-9797-00505690773f';
+
+          let uuidToInsert;
+
+          if (isPostgreSQL(knex) || isCockroachDB(knex)) {
+            uuidToInsert = originalUuid;
+          } else {
+            uuidToInsert = knex.fn.uuidToBin(originalUuid, false);
+          }
+
+          await knex('uuid_table').insert({
+            uuid_col_binary: uuidToInsert,
+          });
+          const uuid = await knex('uuid_table').select('uuid_col_binary');
+
+          let expectedUuid;
+          if (isPostgreSQL(knex) || isCockroachDB(knex)) {
+            expectedUuid = uuid[0].uuid_col_binary;
+          } else {
+            expectedUuid = knex.fn.binToUuid(uuid[0].uuid_col_binary, false);
+          }
+
+          expect(expectedUuid).to.equal(originalUuid);
+        });
+
+        it('should insert binary uuid and retrieve it', async () => {
+          await knex.schema.dropTableIfExists('uuid_table');
+          await knex.schema.createTable('uuid_table', (t) => {
+            t.uuid('uuid_col_binary', { useBinaryUuid: true });
+          });
+          const originalUuid = '3f06af63-a93c-11e4-9797-00505690773f';
+
+          let uuidToInsert;
+
+          if (isPostgreSQL(knex) || isCockroachDB(knex)) {
+            uuidToInsert = originalUuid;
+          } else {
+            uuidToInsert = knex.fn.uuidToBin(originalUuid);
+          }
+
+          await knex('uuid_table').insert({
+            uuid_col_binary: uuidToInsert,
+          });
+          const uuid = await knex('uuid_table').select('uuid_col_binary');
+
+          let expectedUuid;
+          if (isPostgreSQL(knex) || isCockroachDB(knex)) {
+            expectedUuid = uuid[0].uuid_col_binary;
+          } else {
+            expectedUuid = knex.fn.binToUuid(uuid[0].uuid_col_binary);
+          }
+
+          expect(expectedUuid).to.equal(originalUuid);
+        });
+
+        it('#5154 - should properly mark COLUMN_DEFAULT as null', async function () {
+          if (!isMysql(knex)) {
+            return this.skip();
+          }
+
+          await knex.schema.dropTableIfExists('null_col');
+          await knex.schema.createTable('null_col', function (table) {
+            table.date('foo').defaultTo(null).nullable();
+          });
+          const columnInfo = await knex('null_col').columnInfo();
+
+          expect(columnInfo).to.deep.equal({
+            foo: {
+              type: 'date',
+              maxLength: null,
+              nullable: true,
+              defaultValue: null,
+            },
+          });
+        });
+
+        it('#2184 - should properly escape table name for SQLite columnInfo', async function () {
           if (!isSQLite(knex)) {
             return this.skip();
           }
 
-          return knex.schema
-            .dropTableIfExists('group')
-            .then(function () {
-              return knex.schema.createTable('group', function (table) {
-                table.integer('foo');
-              });
-            })
-            .then(function () {
-              return knex('group').columnInfo();
-            })
-            .then(function (columnInfo) {
-              expect(columnInfo).to.deep.equal({
-                foo: {
-                  type: 'integer',
-                  maxLength: null,
-                  nullable: true,
-                  defaultValue: null,
-                },
-              });
-            });
+          await knex.schema.dropTableIfExists('group');
+          await knex.schema.createTable('group', function (table) {
+            table.integer('foo');
+          });
+          const columnInfo = await knex('group').columnInfo();
+
+          expect(columnInfo).to.deep.equal({
+            foo: {
+              type: 'integer',
+              maxLength: null,
+              nullable: true,
+              defaultValue: null,
+            },
+          });
         });
 
         if (isOracle(knex)) {
           const oracledb = require('oracledb');
           describe('test oracle stored procedures', function () {
-            it('create stored procedure', function () {
-              return knex
-                .raw(
-                  `
+            it('create stored procedure', async function () {
+              const result = await knex.raw(
+                `
             CREATE OR REPLACE PROCEDURE SYSTEM.multiply (X IN NUMBER, Y IN NUMBER, OUTPUT OUT NUMBER)
               IS
               BEGIN
                 OUTPUT := X * Y;
               END;`
-                )
-                .then(function (result) {
-                  expect(result).to.be.an('array');
-                });
+              );
+              expect(result).to.be.an('array');
             });
 
-            it('get outbound values from stored procedure', function () {
+            it('get outbound values from stored procedure', async function () {
               const bindVars = {
                 x: 6,
                 y: 7,
@@ -428,27 +575,28 @@ describe('Additional', function () {
                   dir: oracledb.BIND_OUT,
                 },
               };
-              return knex
-                .raw('BEGIN SYSTEM.MULTIPLY(:x, :y, :output); END;', bindVars)
-                .then(function (result) {
-                  expect(result[0]).to.be.ok;
-                  expect(result[0]).to.equal('42');
-                });
+              const result = knex.raw(
+                'BEGIN SYSTEM.MULTIPLY(:x, :y, :output); END;',
+                bindVars
+              );
+
+              expect(result[0]).to.be.ok;
+              expect(result[0]).to.equal('42');
             });
 
-            it('drop stored procedure', function () {
+            it('drop stored procedure', async function () {
               const bindVars = { x: 6, y: 7 };
-              return knex
-                .raw('drop procedure SYSTEM.MULTIPLY', bindVars)
-                .then(function (result) {
-                  expect(result).to.be.ok;
-                  expect(result).to.be.an('array');
-                });
+              const result = await knex.raw(
+                'drop procedure SYSTEM.MULTIPLY',
+                bindVars
+              );
+              expect(result).to.be.ok;
+              expect(result).to.be.an('array');
             });
           });
         }
 
-        it('should allow renaming a column', function () {
+        it('should allow renaming a column', async function () {
           let countColumn;
           if (isOracle(knex)) {
             countColumn = 'COUNT(*)';
@@ -458,7 +606,10 @@ describe('Additional', function () {
             countColumn = 'count(*)';
           }
 
-          let count;
+          await dropTables(knex);
+          await createAccounts(knex, false, false);
+          await createTestTableTwo(knex);
+
           const inserts = [];
           _.times(40, function (i) {
             inserts.push({
@@ -467,59 +618,68 @@ describe('Additional', function () {
               last_name: 'Data',
             });
           });
-          return knex('accounts')
-            .insert(inserts)
-            .then(function () {
-              return knex.count('*').from('accounts');
+          await knex('accounts').insert(inserts);
+
+          let aboutCol;
+          if (isMysql(knex)) {
+            const metadata = await knex.raw('SHOW FULL COLUMNS FROM accounts');
+            // Store the column metadata
+            aboutCol = metadata[0].filter((t) => t.Field === 'about')[0];
+            delete aboutCol.Field;
+          }
+
+          const count = (await knex.count('*').from('accounts'))[0][
+            countColumn
+          ];
+
+          await knex.schema
+            .table('accounts', function (t) {
+              t.renameColumn('about', 'about_col');
             })
-            .then(function (resp) {
-              count = resp[0][countColumn];
-              return knex.schema
-                .table('accounts', function (t) {
-                  t.renameColumn('about', 'about_col');
-                })
-                .testSql(function (tester) {
-                  tester('mysql', [
-                    'show fields from `accounts` where field = ?',
-                  ]);
-                  tester('pg', [
-                    'alter table "accounts" rename "about" to "about_col"',
-                  ]);
-                  tester('pgnative', [
-                    'alter table "accounts" rename "about" to "about_col"',
-                  ]);
-                  tester('pg-redshift', [
-                    'alter table "accounts" rename "about" to "about_col"',
-                  ]);
-                  tester('sqlite3', [
-                    'alter table `accounts` rename `about` to `about_col`',
-                  ]);
-                  tester('oracledb', [
-                    'DECLARE PK_NAME VARCHAR(200); IS_AUTOINC NUMBER := 0; BEGIN  EXECUTE IMMEDIATE (\'ALTER TABLE "accounts" RENAME COLUMN "about" TO "about_col"\');  SELECT COUNT(*) INTO IS_AUTOINC from "USER_TRIGGERS" where trigger_name = \'accounts_autoinc_trg\';  IF (IS_AUTOINC > 0) THEN    SELECT cols.column_name INTO PK_NAME    FROM all_constraints cons, all_cons_columns cols    WHERE cons.constraint_type = \'P\'    AND cons.constraint_name = cols.constraint_name    AND cons.owner = cols.owner    AND cols.table_name = \'accounts\';    IF (\'about_col\' = PK_NAME) THEN      EXECUTE IMMEDIATE (\'DROP TRIGGER "accounts_autoinc_trg"\');      EXECUTE IMMEDIATE (\'create or replace trigger "accounts_autoinc_trg"      BEFORE INSERT on "accounts" for each row        declare        checking number := 1;        begin          if (:new."about_col" is null) then            while checking >= 1 loop              select "accounts_seq".nextval into :new."about_col" from dual;              select count("about_col") into checking from "accounts"              where "about_col" = :new."about_col";            end loop;          end if;        end;\');    end if;  end if;END;',
-                  ]);
-                  tester('mssql', ["exec sp_rename ?, ?, 'COLUMN'"]);
-                });
-            })
-            .then(function () {
-              return knex.count('*').from('accounts');
-            })
-            .then(function (resp) {
-              expect(resp[0][countColumn]).to.equal(count);
-            })
-            .then(function () {
-              return knex('accounts').select('about_col');
-            })
-            .then(function () {
-              return knex.schema.table('accounts', function (t) {
-                t.renameColumn('about_col', 'about');
-              });
-            })
-            .then(function () {
-              return knex.count('*').from('accounts');
-            })
-            .then(function (resp) {
-              expect(resp[0][countColumn]).to.equal(count);
+            .testSql(function (tester) {
+              tester('mysql', [
+                'show full fields from `accounts` where field = ?',
+              ]);
+              tester('pg', [
+                'alter table "accounts" rename "about" to "about_col"',
+              ]);
+              tester('pgnative', [
+                'alter table "accounts" rename "about" to "about_col"',
+              ]);
+              tester('pg-redshift', [
+                'alter table "accounts" rename "about" to "about_col"',
+              ]);
+              tester('sqlite3', [
+                'alter table `accounts` rename `about` to `about_col`',
+              ]);
+              tester('oracledb', [
+                'DECLARE PK_NAME VARCHAR(200); IS_AUTOINC NUMBER := 0; BEGIN  EXECUTE IMMEDIATE (\'ALTER TABLE "accounts" RENAME COLUMN "about" TO "about_col"\');  SELECT COUNT(*) INTO IS_AUTOINC from "USER_TRIGGERS" where trigger_name = \'accounts_autoinc_trg\';  IF (IS_AUTOINC > 0) THEN    SELECT cols.column_name INTO PK_NAME    FROM all_constraints cons, all_cons_columns cols    WHERE cons.constraint_type = \'P\'    AND cons.constraint_name = cols.constraint_name    AND cons.owner = cols.owner    AND cols.table_name = \'accounts\';    IF (\'about_col\' = PK_NAME) THEN      EXECUTE IMMEDIATE (\'DROP TRIGGER "accounts_autoinc_trg"\');      EXECUTE IMMEDIATE (\'create or replace trigger "accounts_autoinc_trg"      BEFORE INSERT on "accounts" for each row        declare        checking number := 1;        begin          if (:new."about_col" is null) then            while checking >= 1 loop              select "accounts_seq".nextval into :new."about_col" from dual;              select count("about_col") into checking from "accounts"              where "about_col" = :new."about_col";            end loop;          end if;        end;\');    end if;  end if;END;',
+              ]);
+              tester('mssql', ["exec sp_rename ?, ?, 'COLUMN'"]);
             });
+
+          if (isMysql(knex)) {
+            const values = await knex.raw('SHOW FULL COLUMNS FROM accounts');
+            const newAboutCol = values[0].filter(
+              (t) => t.Field === 'about_col'
+            )[0];
+            // Check if all metadata excepted the Field name (DEFAULT, COLLATION, EXTRA, etc.) are preserved after rename.
+            delete newAboutCol.Field;
+            expect(aboutCol).to.eql(newAboutCol);
+          }
+
+          const countAfterRename = (await knex.count('*').from('accounts'))[0][
+            countColumn
+          ];
+          expect(countAfterRename).to.equal(count);
+
+          await knex.schema.table('accounts', function (t) {
+            t.renameColumn('about_col', 'about');
+          });
+          const countOrigin = (await knex.count('*').from('accounts'))[0][
+            countColumn
+          ];
+          expect(countOrigin).to.equal(count);
         });
 
         it('should allow dropping a column', async function () {
@@ -636,21 +796,18 @@ describe('Additional', function () {
 
           const query = testQueries[driverName]();
 
-          await query
-            .timeout(200)
-            .then(function () {
-              expect(true).to.equal(false);
-            })
-            .catch(function (error) {
-              expect(_.pick(error, 'timeout', 'name', 'message')).to.deep.equal(
-                {
-                  timeout: 200,
-                  name: 'KnexTimeoutError',
-                  message:
-                    'Defined query timeout of 200ms exceeded when running query.',
-                }
-              );
+          try {
+            await query.timeout(200);
+          } catch (error) {
+            expect(_.pick(error, 'timeout', 'name', 'message')).to.deep.equal({
+              timeout: 200,
+              name: 'KnexTimeoutError',
+              message:
+                'Defined query timeout of 200ms exceeded when running query.',
             });
+            return;
+          }
+          expect(true).to.equal(false);
         });
 
         it('.timeout(ms, {cancel: true}) should throw TimeoutError and cancel slow query', async function () {
@@ -706,7 +863,7 @@ describe('Additional', function () {
             expect(addTimeout).to.throw(
               'Query cancelling not supported for this dialect'
             );
-            return; // TODO: Use `this.skip()` here?
+            this.skip();
           }
 
           const getProcessesQueries = {
@@ -857,41 +1014,37 @@ describe('Additional', function () {
 
           const getProcessesQuery = getProcessesQueries[driverName]();
 
-          await knex
-            .transaction((trx) => addTimeout().transacting(trx))
-            .then(function () {
-              expect(true).to.equal(false);
-            })
-            .catch(async function (error) {
-              expect(_.pick(error, 'timeout', 'name', 'message')).to.deep.equal(
-                {
-                  timeout: 200,
-                  name: 'KnexTimeoutError',
-                  message:
-                    'Defined query timeout of 200ms exceeded when running query.',
-                }
-              );
-
-              // Ensure sleep command is removed.
-              // This query will hang if a connection gets released back to the pool
-              // too early.
-              // 50ms delay since killing query doesn't seem to have immediate effect to the process listing
-              await delay(50);
-              const results = await getProcessesQuery;
-              let processes;
-              let sleepProcess;
-
-              if (_.startsWith(driverName, 'pg')) {
-                processes = results.rows;
-                sleepProcess = _.find(processes, { query: query.toString() });
-              } else {
-                processes = results[0];
-                sleepProcess = _.find(processes, {
-                  Info: 'SELECT SLEEP(10)',
-                });
-              }
-              expect(sleepProcess).to.equal(undefined);
+          try {
+            await knex.transaction((trx) => addTimeout().transacting(trx));
+            expect(true).to.equal(false);
+          } catch (error) {
+            expect(_.pick(error, 'timeout', 'name', 'message')).to.deep.equal({
+              timeout: 200,
+              name: 'KnexTimeoutError',
+              message:
+                'Defined query timeout of 200ms exceeded when running query.',
             });
+
+            // Ensure sleep command is removed.
+            // This query will hang if a connection gets released back to the pool
+            // too early.
+            // 50ms delay since killing query doesn't seem to have immediate effect to the process listing
+            await delay(50);
+            const results = await getProcessesQuery;
+            let processes;
+            let sleepProcess;
+
+            if (_.startsWith(driverName, 'pg')) {
+              processes = results.rows;
+              sleepProcess = _.find(processes, { query: query.toString() });
+            } else {
+              processes = results[0];
+              sleepProcess = _.find(processes, {
+                Info: 'SELECT SLEEP(10)',
+              });
+            }
+            expect(sleepProcess).to.equal(undefined);
+          }
         });
 
         it('.timeout(ms, {cancel: true}) should cancel slow query even if connection pool is exhausted', async function () {
@@ -903,6 +1056,16 @@ describe('Additional', function () {
           // To make this test easier, I'm changing the pool settings to max 1.
           // Also setting acquireTimeoutMillis to lower as not to wait the default time
           const knexConfig = _.cloneDeep(knex.client.config);
+          if (
+            knex.client.config.connection &&
+            knex.client.config.connection.password
+          ) {
+            setHiddenProperty(
+              knexConfig.connection,
+              knex.client.config.connection
+            );
+          }
+
           knexConfig.pool.min = 0;
           knexConfig.pool.max = 1;
           knexConfig.pool.acquireTimeoutMillis = 100;
@@ -1020,6 +1183,16 @@ describe('Additional', function () {
           // To make this test easier, I'm changing the pool settings to max 1.
           // Also setting acquireTimeoutMillis to lower as not to wait the default time
           const knexConfig = _.cloneDeep(knex.client.config);
+          if (
+            knex.client.config.connection &&
+            knex.client.config.connection.password
+          ) {
+            setHiddenProperty(
+              knexConfig.connection,
+              knex.client.config.connection
+            );
+          }
+
           knexConfig.pool.min = 0;
           knexConfig.pool.max = 2;
           knexConfig.pool.acquireTimeoutMillis = 100;
@@ -1104,7 +1277,7 @@ describe('Additional', function () {
       });
 
       describe('Events', () => {
-        it('Event: query-response', function () {
+        it('Event: query-response', async function () {
           let queryCount = 0;
 
           const onQueryResponse = function (response, obj, builder) {
@@ -1117,23 +1290,17 @@ describe('Additional', function () {
           };
           knex.on('query-response', onQueryResponse);
 
-          return knex('accounts')
-            .select()
-            .on('query-response', onQueryResponse)
-            .then(function () {
-              return knex.transaction(function (tr) {
-                return tr('accounts')
-                  .select()
-                  .on('query-response', onQueryResponse); //Transactions should emit the event as well
-              });
-            })
-            .then(function () {
-              knex.removeListener('query-response', onQueryResponse);
-              expect(queryCount).to.equal(4);
-            });
+          await knex('accounts').select().on('query-response', onQueryResponse);
+          await knex.transaction(function (tr) {
+            return tr('accounts')
+              .select()
+              .on('query-response', onQueryResponse); //Transactions should emit the event as well
+          });
+          knex.removeListener('query-response', onQueryResponse);
+          expect(queryCount).to.equal(4);
         });
 
-        it('Event: preserves listeners on a copy with user params', function () {
+        it('Event: preserves listeners on a copy with user params', async function () {
           let queryCount = 0;
 
           const onQueryResponse = function (response, obj, builder) {
@@ -1147,26 +1314,22 @@ describe('Additional', function () {
           knex.on('query-response', onQueryResponse);
           const knexCopy = knex.withUserParams({});
 
-          return knexCopy('accounts')
+          await knexCopy('accounts')
             .select()
-            .on('query-response', onQueryResponse)
-            .then(function () {
-              return knexCopy.transaction(function (tr) {
-                return tr('accounts')
-                  .select()
-                  .on('query-response', onQueryResponse); //Transactions should emit the event as well
-              });
-            })
-            .then(function () {
-              expect(Object.keys(knex._events).length).to.equal(1);
-              expect(Object.keys(knexCopy._events).length).to.equal(1);
-              knex.removeListener('query-response', onQueryResponse);
-              expect(Object.keys(knex._events).length).to.equal(0);
-              expect(queryCount).to.equal(4);
-            });
+            .on('query-response', onQueryResponse);
+          await knexCopy.transaction(function (tr) {
+            return tr('accounts')
+              .select()
+              .on('query-response', onQueryResponse); //Transactions should emit the event as well
+          });
+          expect(Object.keys(knex._events).length).to.equal(1);
+          expect(Object.keys(knexCopy._events).length).to.equal(1);
+          knex.removeListener('query-response', onQueryResponse);
+          expect(Object.keys(knex._events).length).to.equal(0);
+          expect(queryCount).to.equal(4);
         });
 
-        it('Event: query-error', function () {
+        it('Event: query-error', async function () {
           let queryCountKnex = 0;
           let queryCountBuilder = 0;
           const onQueryErrorKnex = function (error, obj) {
@@ -1186,39 +1349,31 @@ describe('Additional', function () {
           };
 
           knex.on('query-error', onQueryErrorKnex);
-
-          return knex
-            .raw('Broken query')
-            .on('query-error', onQueryErrorBuilder)
-            .then(function () {
-              expect(true).to.equal(false); //Should not be resolved
-            })
-            .catch(function () {
-              knex.removeListener('query-error', onQueryErrorKnex);
-              knex.removeListener('query-error', onQueryErrorBuilder);
-              expect(queryCountBuilder).to.equal(1);
-              expect(queryCountKnex).to.equal(1);
-            });
+          try {
+            await knex
+              .raw('Broken query')
+              .on('query-error', onQueryErrorBuilder);
+            expect(true).to.equal(false); //Should not be resolved
+          } catch (err) {
+            knex.removeListener('query-error', onQueryErrorKnex);
+            knex.removeListener('query-error', onQueryErrorBuilder);
+            expect(queryCountBuilder).to.equal(1);
+            expect(queryCountKnex).to.equal(1);
+          }
         });
 
-        it('Event: start', function () {
-          return knex('accounts')
-            .insert({ last_name: 'Start event test' })
-            .then(function () {
-              const queryBuilder = knex('accounts').select();
+        it('Event: start', async function () {
+          await knex('accounts').insert({ last_name: 'Start event test' });
+          const queryBuilder = knex('accounts').select();
 
-              queryBuilder.on('start', function (builder) {
-                //Alter builder prior to compilation
-                //Select only one row
-                builder.where('last_name', 'Start event test').first();
-              });
-
-              return queryBuilder;
-            })
-            .then(function (row) {
-              expect(row).to.exist;
-              expect(row.last_name).to.equal('Start event test');
-            });
+          queryBuilder.on('start', function (builder) {
+            //Alter builder prior to compilation
+            //Select only one row
+            builder.where('last_name', 'Start event test').first();
+          });
+          const row = await queryBuilder;
+          expect(row).to.exist;
+          expect(row.last_name).to.equal('Start event test');
         });
 
         it("Event 'query' should not emit native sql string", function () {
@@ -1247,24 +1402,22 @@ describe('Additional', function () {
         after(() => {
           delete knex.client.config.asyncStackTraces;
         });
-        it('should capture stack trace on raw query', () => {
-          return knex
-            .raw('select * from some_nonexisten_table')
-            .catch((err) => {
-              expect(err.stack.split('\n')[2]).to.match(/at Object\.raw \(/); // the index 2 might need adjustment if the code is refactored
-              expect(typeof err.originalStack).to.equal('string');
-            });
+        it('should capture stack trace on raw query', async () => {
+          try {
+            await knex.raw('select * from some_nonexisten_table');
+          } catch (err) {
+            expect(err.stack.split('\n')[2]).to.match(/at Object\.raw \(/); // the index 2 might need adjustment if the code is refactored
+            expect(typeof err.originalStack).to.equal('string');
+          }
         });
 
-        it('should capture stack trace on schema builder', () => {
-          return knex.schema
-            .renameTable('some_nonexisten_table', 'whatever')
-            .catch((err) => {
-              expect(err.stack.split('\n')[1]).to.match(
-                /client\.schemaBuilder/
-              ); // the index 1 might need adjustment if the code is refactored
-              expect(typeof err.originalStack).to.equal('string');
-            });
+        it('should capture stack trace on schema builder', async () => {
+          try {
+            await knex.schema.renameTable('some_nonexisten_table', 'whatever');
+          } catch (err) {
+            expect(err.stack.split('\n')[1]).to.match(/client\.schemaBuilder/); // the index 1 might need adjustment if the code is refactored
+            expect(typeof err.originalStack).to.equal('string');
+          }
         });
       });
 
@@ -1336,6 +1489,17 @@ describe('Additional', function () {
             knexDb.initialize();
             expect(knexDb.client.pool.destroyed).to.equal(false);
           });
+        });
+
+        it('should not leak passwords when logged', async function () {
+          const query = knex('test_table_two').select('*');
+          const fakeLog = util.inspect(query, { depth: null });
+
+          // These passwords come from `scripts/docker-compose.yml`
+          const passwordMatches = fakeLog.match(
+            /(knextest|testpassword|S0meVeryHardPassword|testrootpassword)/g
+          );
+          expect(passwordMatches).to.be.null;
         });
       });
     });

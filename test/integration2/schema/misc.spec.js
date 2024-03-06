@@ -13,6 +13,7 @@ const {
   isMssql,
   isCockroachDB,
   isPostgreSQL,
+  isBetterSQLite3,
 } = require('../../util/db-helpers');
 const { getAllDbs, getKnexForDb } = require('../util/knex-instance-provider');
 const logger = require('../../integration/logger');
@@ -321,13 +322,65 @@ describe('Schema (misc)', () => {
                 expect(Object.keys(res)).to.have.all.members(['id', 'data']);
               });
           });
+
+          it('copy table with additionnal column', async () => {
+            await knex.schema.dropTableIfExists('table_copied');
+            await knex.schema
+              .createTableLike(
+                'table_copied',
+                'table_to_copy',
+                function (table) {
+                  table.text('add_col');
+                  table.integer('add_num_col');
+                }
+              )
+              .testSql((tester) => {
+                tester('mysql', [
+                  'create table `table_copied` like `table_to_copy`',
+                  'alter table `table_copied` add `add_col` text, add `add_num_col` int',
+                ]);
+                tester(
+                  ['pg', 'cockroachdb'],
+                  [
+                    'create table "table_copied" (like "table_to_copy" including all, "add_col" text, "add_num_col" integer)',
+                  ]
+                );
+                tester('pg-redshift', [
+                  'create table "table_copied" (like "table_to_copy")',
+                  'alter table "table_copied" add column "add_col" varchar(max)',
+                  'alter table "table_copied" add column "add_num_col" integer',
+                ]);
+                tester('sqlite3', [
+                  'create table `table_copied` as select * from `table_to_copy` where 0=1',
+                  'alter table `table_copied` add column `add_col` text',
+                  'alter table `table_copied` add column `add_num_col` integer',
+                ]);
+                tester('oracledb', [
+                  'create table "table_copied" as (select * from "table_to_copy" where 0=1)',
+                  'alter table "table_copied" add ("add_col" clob, "add_num_col" integer)',
+                ]);
+                tester('mssql', [
+                  'SELECT * INTO [table_copied] FROM [table_to_copy] WHERE 0=1',
+                  'ALTER TABLE [table_copied] ADD [add_col] nvarchar(max), [add_num_col] int',
+                ]);
+              });
+
+            expect(await knex.schema.hasTable('table_copied')).to.equal(true);
+
+            await knex('table_copied')
+              .columnInfo()
+              .then((res) => {
+                expect(Object.keys(res)).to.have.all.members([
+                  'id',
+                  'data',
+                  'add_col',
+                  'add_num_col',
+                ]);
+              });
+          });
         });
 
         describe('increments types - postgres', () => {
-          if (!isPgBased(knex)) {
-            return Promise.resolve();
-          }
-
           before(async () => {
             await knex.schema.createTable(
               'increments_columns_1_test',
@@ -348,7 +401,11 @@ describe('Schema (misc)', () => {
             await knex.schema.dropTable('increments_columns_2_test');
           });
 
-          it('#2210 - creates an incrementing column with a comment', () => {
+          it('#2210 - creates an incrementing column with a comment', function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
+
             const table_name = 'increments_columns_1_test';
             const expected_column = 'id';
             const expected_comment = 'comment_1';
@@ -384,7 +441,11 @@ describe('Schema (misc)', () => {
               });
           });
 
-          it('#2210 - creates an incrementing column with a specified name and comment', () => {
+          it('#2210 - creates an incrementing column with a specified name and comment', function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
+
             const table_name = 'increments_columns_2_test';
             const expected_column = 'named_2';
             const expected_comment = 'comment_2';
@@ -421,11 +482,73 @@ describe('Schema (misc)', () => {
           });
         });
 
-        describe('increments types - mysql', () => {
-          if (!isMysql(knex)) {
-            return Promise.resolve();
-          }
+        describe('uuid types - postgres', () => {
+          after(async () => {
+            if (isPgBased(knex)) {
+              await knex.schema.dropTable('uuid_column_test');
+            }
+          });
 
+          it('creates a uuid column as primary using fluid syntax', async function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
+            const table_name = 'uuid_column_test';
+            const expected_column = 'id';
+            const expected_type = 'uuid';
+
+            await knex.schema.dropTableIfExists(table_name);
+            await knex.schema.createTable(table_name, (table) => {
+              table.uuid('id').primary();
+            });
+
+            const cols = await knex.raw(
+              `select c.column_name, c.data_type
+                     from INFORMATION_SCHEMA.COLUMNS c
+                     join INFORMATION_SCHEMA.KEY_COLUMN_USAGE cu
+                     on (c.table_name = cu.table_name and c.column_name = cu.column_name)
+                     where c.table_name = ?
+                     and (cu.constraint_name like '%_pkey' or cu.constraint_name = 'primary')`,
+              table_name
+            );
+            const column_name = cols.rows[0].column_name;
+            const column_type = cols.rows[0].data_type;
+
+            expect(column_name).to.equal(expected_column);
+            expect(column_type).to.equal(expected_type);
+          });
+
+          it('#5211 - creates an uuid column as primary key', async function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
+            const table_name = 'uuid_column_test';
+            const expected_column = 'id';
+            const expected_type = 'uuid';
+
+            await knex.schema.dropTableIfExists(table_name);
+            await knex.schema.createTable(table_name, (table) => {
+              table.uuid('id', { primaryKey: true });
+            });
+
+            const cols = await knex.raw(
+              `select c.column_name, c.data_type
+                     from INFORMATION_SCHEMA.COLUMNS c
+                     join INFORMATION_SCHEMA.KEY_COLUMN_USAGE cu
+                     on (c.table_name = cu.table_name and c.column_name = cu.column_name)
+                     where c.table_name = ?
+                     and (cu.constraint_name like '%_pkey' or cu.constraint_name = 'primary')`,
+              table_name
+            );
+            const column_name = cols.rows[0].column_name;
+            const column_type = cols.rows[0].data_type;
+
+            expect(column_name).to.equal(expected_column);
+            expect(column_type).to.equal(expected_type);
+          });
+        });
+
+        describe('increments types - mysql', () => {
           before(() =>
             Promise.all([
               knex.schema.createTable('increments_columns_1_test', (table) => {
@@ -444,7 +567,11 @@ describe('Schema (misc)', () => {
             ])
           );
 
-          it('#2210 - creates an incrementing column with a comment', () => {
+          it('#2210 - creates an incrementing column with a comment', function () {
+            if (!isMysql(knex)) {
+              return this.skip();
+            }
+
             const table_name = 'increments_columns_1_test';
             const expected_column = 'id';
             const expected_comment = 'comment_1';
@@ -464,7 +591,11 @@ describe('Schema (misc)', () => {
               });
           });
 
-          it('#2210 - creates an incrementing column with a specified name and comment', () => {
+          it('#2210 - creates an incrementing column with a specified name and comment', function () {
+            if (!isMysql(knex)) {
+              return this.skip();
+            }
+
             const table_name = 'increments_columns_2_test';
             const expected_column = 'named_2';
             const expected_comment = 'comment_2';
@@ -486,19 +617,21 @@ describe('Schema (misc)', () => {
         });
 
         describe('enum - postgres', () => {
-          if (!isPgBased(knex)) {
-            return Promise.resolve();
-          }
+          afterEach(async () => {
+            if (isPgBased(knex)) {
+              await knex.schema
+                .dropTableIfExists('native_enum_test')
+                .raw('DROP TYPE IF EXISTS "foo_type"')
+                .raw('DROP SCHEMA IF EXISTS "test" CASCADE');
+            }
+          });
 
-          afterEach(() =>
-            knex.schema
-              .dropTableIfExists('native_enum_test')
-              .raw('DROP TYPE IF EXISTS "foo_type"')
-              .raw('DROP SCHEMA IF EXISTS "test" CASCADE')
-          );
+          it('uses native type with schema', function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
 
-          it('uses native type with schema', () =>
-            knex.schema.createSchemaIfNotExists('test').then(() => {
+            return knex.schema.createSchemaIfNotExists('test').then(() => {
               return knex.schema
                 .withSchema('test')
                 .createTable('native_enum_test', (table) => {
@@ -520,10 +653,15 @@ describe('Schema (misc)', () => {
                     ]
                   );
                 });
-            }));
+            });
+          });
 
-          it('uses native type when useNative is specified', () =>
-            knex.schema
+          it('uses native type when useNative is specified', function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
+
+            return knex.schema
               .createTable('native_enum_test', (table) => {
                 table
                   .enum('foo_column', ['a', 'b', 'c'], {
@@ -541,10 +679,14 @@ describe('Schema (misc)', () => {
                     'create table "native_enum_test" ("foo_column" "foo_type" not null, "id" uuid not null)',
                   ]
                 );
-              }));
+              });
+          });
 
-          it('uses an existing native type when useNative and existingType are specified', () =>
-            knex
+          it('uses an existing native type when useNative and existingType are specified', function () {
+            if (!isPgBased(knex)) {
+              return this.skip();
+            }
+            return knex
               .raw("create type \"foo_type\" as enum ('a', 'b', 'c')")
               .then(() => {
                 return knex.schema
@@ -566,7 +708,8 @@ describe('Schema (misc)', () => {
                       ]
                     );
                   });
-              }));
+              });
+          });
         });
 
         it('Callback function must be supplied', () => {
@@ -641,23 +784,12 @@ describe('Schema (misc)', () => {
                 'create index `test_table_one_logins_index` on `test_table_one` (`logins`)',
               ]);
               tester('oracledb', [
-                `create table "test_table_one"
-                     (
-                       "id"         number(20, 0) not null primary key,
-                       "first_name" varchar2(255),
-                       "last_name"  varchar2(255),
-                       "email"      varchar2(255) null,
-                       "logins"     integer default '1',
-                       "balance"    float   default '0',
-                       "about"      varchar2(4000),
-                       "created_at" timestamp with local time zone,
-                       "updated_at" timestamp with local time zone
-                     )`,
+                `create table "test_table_one" ("id" number(20, 0) not null primary key, "first_name" varchar2(255), "last_name" varchar2(255), "email" varchar2(255) null, "logins" integer default '1', "balance" float default '0', "about" varchar2(4000), "created_at" timestamp with local time zone, "updated_at" timestamp with local time zone)`,
                 'comment on table "test_table_one" is \'A table comment.\'',
                 `DECLARE PK_NAME VARCHAR(200); BEGIN  EXECUTE IMMEDIATE ('CREATE SEQUENCE "test_table_one_seq"');  SELECT cols.column_name INTO PK_NAME  FROM all_constraints cons, all_cons_columns cols  WHERE cons.constraint_type = 'P'  AND cons.constraint_name = cols.constraint_name  AND cons.owner = cols.owner  AND cols.table_name = 'test_table_one';  execute immediate ('create or replace trigger "test_table_one_autoinc_trg"  BEFORE INSERT on "test_table_one"  for each row  declare  checking number := 1;  begin    if (:new."' || PK_NAME || '" is null) then      while checking >= 1 loop        select "test_table_one_seq".nextval into :new."' || PK_NAME || '" from dual;        select count("' || PK_NAME || '") into checking from "test_table_one"        where "' || PK_NAME || '" = :new."' || PK_NAME || '";      end loop;    end if;  end;'); END;`,
                 'comment on column "test_table_one"."logins" is \'\'',
                 'comment on column "test_table_one"."about" is \'A comment.\'',
-                'create index "NkZo/dGRI9O73/NE2fHo+35d4jk" on "test_table_one" ("first_name")',
+                'create index "test_table_one_first_name_index" on "test_table_one" ("first_name")',
                 'alter table "test_table_one" add constraint "test_table_one_email_unique" unique ("email")',
                 'create index "test_table_one_logins_index" on "test_table_one" ("logins")',
               ]);
@@ -670,6 +802,47 @@ describe('Schema (misc)', () => {
                 'CREATE INDEX [test_table_one_logins_index] ON [test_table_one] ([logins])',
               ]);
             }));
+
+        it('create table with timestamps options', async () => {
+          await knex.schema
+            .createTable('test_table_timestamp', (table) => {
+              if (isMysql(knex)) table.engine('InnoDB');
+              table.bigIncrements('id');
+              table.timestamps({
+                useTimestamps: false,
+                defaultToNow: true,
+                useCamelCase: true,
+              });
+            })
+            .testSql((tester) => {
+              tester('mysql', [
+                'create table `test_table_timestamp` (`id` bigint unsigned not null auto_increment primary key, `createdAt` datetime not null default CURRENT_TIMESTAMP, `updatedAt` datetime not null default CURRENT_TIMESTAMP) default character set utf8 engine = InnoDB',
+              ]);
+              tester(
+                ['pg', 'cockroachdb'],
+                [
+                  'create table "test_table_timestamp" ("id" bigserial primary key, "createdAt" timestamptz not null default CURRENT_TIMESTAMP, "updatedAt" timestamptz not null default CURRENT_TIMESTAMP)',
+                ]
+              );
+              tester('pg-redshift', [
+                'create table "test_table_timestamp" ("id" bigint identity(1,1) primary key not null, "createdAt" timestamptz not null default CURRENT_TIMESTAMP, "updatedAt" timestamptz not null default CURRENT_TIMESTAMP)',
+              ]);
+              tester('sqlite3', [
+                'create table `test_table_timestamp` (`id` integer not null primary key autoincrement, `createdAt` datetime not null default CURRENT_TIMESTAMP, `updatedAt` datetime not null default CURRENT_TIMESTAMP)',
+              ]);
+              tester('oracledb', [
+                `create table "test_table_timestamp" ("id" number(20, 0) not null primary key, "createdAt" timestamp with local time zone default CURRENT_TIMESTAMP not null, "updatedAt" timestamp with local time zone default CURRENT_TIMESTAMP not null)`,
+                `DECLARE PK_NAME VARCHAR(200); BEGIN  EXECUTE IMMEDIATE ('CREATE SEQUENCE "test_table_timestamp_seq"');  SELECT cols.column_name INTO PK_NAME  FROM all_constraints cons, all_cons_columns cols  WHERE cons.constraint_typ` +
+                  `e = 'P'  AND cons.constraint_name = cols.constraint_name  AND cons.owner = cols.owner  AND cols.table_name = 'test_table_timestamp';  execute immediate ('create or replace trigger "test_table_timestamp_autoinc_trg"  BEFORE INSERT on` +
+                  ` "test_table_timestamp"  for each row  declare  checking number := 1;  begin    if (:new."' || PK_NAME || '" is null) then      while checking >= 1 loop        select "test_table_timestamp_seq".nextval into :new."' || PK_N` +
+                  `AME || '" from dual;        select count("' || PK_NAME || '") into checking from "test_table_timestamp"        where "' || PK_NAME || '" = :new."' || PK_NAME || '";      end loop;    end if;  end;'); END;`,
+              ]);
+              tester('mssql', [
+                'CREATE TABLE [test_table_timestamp] ([id] bigint identity(1,1) not null primary key, [createdAt] datetime2 not null CONSTRAINT [test_table_timestamp_createdat_default] DEFAULT CURRENT_TIMESTAMP, [updatedAt] datetime2 not null CONSTRAINT [test_table_timestamp_updatedat_default] DEFAULT CURRENT_TIMESTAMP)',
+              ]);
+            });
+          await knex.schema.dropTableIfExists('test_table_timestamp');
+        });
 
         it('is possible to set the db engine with the table.engine', () =>
           knex.schema
@@ -713,14 +886,12 @@ describe('Schema (misc)', () => {
             })
             .testSql((tester) => {
               tester('mysql', [
-                'create table `test_table_three` (`main` int not null, `paragraph` text, `metadata` json default (\'{"a":10}\')) default character set utf8 engine = InnoDB',
-                'alter table `test_table_three` add primary key `test_table_three_pkey`(`main`)',
+                'create table `test_table_three` (`main` int not null, `paragraph` text, `metadata` json default (\'{"a":10}\'), primary key (`main`)) default character set utf8 engine = InnoDB',
               ]);
               tester(
                 ['pg', 'cockroachdb'],
                 [
-                  'create table "test_table_three" ("main" integer not null, "paragraph" text default \'Lorem ipsum Qui quis qui in.\', "metadata" json default \'{"a":10}\', "details" jsonb default \'{"b":{"d":20}}\')',
-                  'alter table "test_table_three" add constraint "test_table_three_pkey" primary key ("main")',
+                  'create table "test_table_three" ("main" integer not null, "paragraph" text default \'Lorem ipsum Qui quis qui in.\', "metadata" json default \'{"a":10}\', "details" jsonb default \'{"b":{"d":20}}\', constraint "test_table_three_pkey" primary key ("main"))',
                 ]
               );
               tester('pg-redshift', [
@@ -772,9 +943,9 @@ describe('Schema (misc)', () => {
               }
               table.integer('integer_column', 5);
               table.tinyint('tinyint_column', 5);
-              table.smallint('smallint_column', 5);
-              table.mediumint('mediumint_column', 5);
-              table.bigint('bigint_column', 5);
+              table.smallint('smallint_column');
+              table.mediumint('mediumint_column');
+              table.bigint('bigint_column');
             })
             .testSql((tester) => {
               tester('mysql', [
@@ -1089,8 +1260,8 @@ describe('Schema (misc)', () => {
               ]);
               tester('oracledb', [
                 'create table "test_foreign_table_two" ("id" integer not null primary key, "fkey_two" integer, "fkey_three" integer, "fkey_four" integer)',
-                'DECLARE PK_NAME VARCHAR(200); BEGIN  EXECUTE IMMEDIATE (\'CREATE SEQUENCE "test_foreign_table_two_seq"\');  SELECT cols.column_name INTO PK_NAME  FROM all_constraints cons, all_cons_columns cols  WHERE cons.constraint_type = \'P\'  AND cons.constraint_name = cols.constraint_name  AND cons.owner = cols.owner  AND cols.table_name = \'test_foreign_table_two\';  execute immediate (\'create or replace trigger "m6uvAnbUQqcHvfWTN5IAjip1/vk"  BEFORE INSERT on "test_foreign_table_two"  for each row  declare  checking number := 1;  begin    if (:new."\' || PK_NAME || \'" is null) then      while checking >= 1 loop        select "test_foreign_table_two_seq".nextval into :new."\' || PK_NAME || \'" from dual;        select count("\' || PK_NAME || \'") into checking from "test_foreign_table_two"        where "\' || PK_NAME || \'" = :new."\' || PK_NAME || \'";      end loop;    end if;  end;\'); END;',
-                'alter table "test_foreign_table_two" add constraint "q7TfvbIx3HUQbh+l+e5N+J+Guag" foreign key ("fkey_two") references "test_table_two" ("id")',
+                'DECLARE PK_NAME VARCHAR(200); BEGIN  EXECUTE IMMEDIATE (\'CREATE SEQUENCE "test_foreign_table_two_seq"\');  SELECT cols.column_name INTO PK_NAME  FROM all_constraints cons, all_cons_columns cols  WHERE cons.constraint_type = \'P\'  AND cons.constraint_name = cols.constraint_name  AND cons.owner = cols.owner  AND cols.table_name = \'test_foreign_table_two\';  execute immediate (\'create or replace trigger "test_foreign_table_two_autoinc_trg"  BEFORE INSERT on "test_foreign_table_two"  for each row  declare  checking number := 1;  begin    if (:new."\' || PK_NAME || \'" is null) then      while checking >= 1 loop        select "test_foreign_table_two_seq".nextval into :new."\' || PK_NAME || \'" from dual;        select count("\' || PK_NAME || \'") into checking from "test_foreign_table_two"        where "\' || PK_NAME || \'" = :new."\' || PK_NAME || \'";      end loop;    end if;  end;\'); END;',
+                'alter table "test_foreign_table_two" add constraint "test_foreign_table_two_fkey_two_foreign" foreign key ("fkey_two") references "test_table_two" ("id")',
                 'alter table "test_foreign_table_two" add constraint "fk_fkey_three" foreign key ("fkey_three") references "test_table_two" ("id")',
                 'alter table "test_foreign_table_two" add constraint "fk_fkey_four" foreign key ("fkey_four") references "test_table_two" ("id")',
               ]);
@@ -1159,7 +1330,7 @@ describe('Schema (misc)', () => {
               ]);
               tester('oracledb', [
                 'create table "composite_key_test" ("column_a" integer, "column_b" integer, "details" clob, "status" smallint)',
-                'alter table "composite_key_test" add constraint "zYmMt0VQwlLZ20XnrMicXZ0ufZk" unique ("column_a", "column_b")',
+                'alter table "composite_key_test" add constraint "composite_key_test_column_a_column_b_unique" unique ("column_a", "column_b")',
               ]);
               tester('mssql', [
                 'CREATE TABLE [composite_key_test] ([column_a] int, [column_b] int, [details] nvarchar(max), [status] tinyint)',
@@ -1220,7 +1391,7 @@ describe('Schema (misc)', () => {
               ]);
               tester('oracledb', [
                 'create table "charset_collate_test" ("id" integer not null primary key, "account_id" integer, "details" clob, "status" smallint)',
-                'DECLARE PK_NAME VARCHAR(200); BEGIN  EXECUTE IMMEDIATE (\'CREATE SEQUENCE "charset_collate_test_seq"\');  SELECT cols.column_name INTO PK_NAME  FROM all_constraints cons, all_cons_columns cols  WHERE cons.constraint_type = \'P\'  AND cons.constraint_name = cols.constraint_name  AND cons.owner = cols.owner  AND cols.table_name = \'charset_collate_test\';  execute immediate (\'create or replace trigger "x9C3VzXH9urIKnTjm32JM7OvYYQ"  BEFORE INSERT on "charset_collate_test"  for each row  declare  checking number := 1;  begin    if (:new."\' || PK_NAME || \'" is null) then      while checking >= 1 loop        select "charset_collate_test_seq".nextval into :new."\' || PK_NAME || \'" from dual;        select count("\' || PK_NAME || \'") into checking from "charset_collate_test"        where "\' || PK_NAME || \'" = :new."\' || PK_NAME || \'";      end loop;    end if;  end;\'); END;',
+                'DECLARE PK_NAME VARCHAR(200); BEGIN  EXECUTE IMMEDIATE (\'CREATE SEQUENCE "charset_collate_test_seq"\');  SELECT cols.column_name INTO PK_NAME  FROM all_constraints cons, all_cons_columns cols  WHERE cons.constraint_type = \'P\'  AND cons.constraint_name = cols.constraint_name  AND cons.owner = cols.owner  AND cols.table_name = \'charset_collate_test\';  execute immediate (\'create or replace trigger "charset_collate_test_autoinc_trg"  BEFORE INSERT on "charset_collate_test"  for each row  declare  checking number := 1;  begin    if (:new."\' || PK_NAME || \'" is null) then      while checking >= 1 loop        select "charset_collate_test_seq".nextval into :new."\' || PK_NAME || \'" from dual;        select count("\' || PK_NAME || \'") into checking from "charset_collate_test"        where "\' || PK_NAME || \'" = :new."\' || PK_NAME || \'";      end loop;    end if;  end;\'); END;',
               ]);
               tester('mssql', [
                 'CREATE TABLE [charset_collate_test] ([id] int identity(1,1) not null primary key, [account_id] int, [details] nvarchar(max), [status] tinyint)',
@@ -1248,6 +1419,9 @@ describe('Schema (misc)', () => {
               );
               tester('pg-redshift', [
                 'create table "bool_test" ("one" boolean, "two" boolean default \'0\', "three" boolean default \'1\', "four" boolean default \'1\', "five" boolean default \'0\')',
+              ]);
+              tester('better-sqlite3', [
+                "create table `bool_test` (`one` boolean, `two` boolean default '0', `three` boolean default '1', `four` boolean default '1', `five` boolean default '0')",
               ]);
               tester('sqlite3', [
                 "create table `bool_test` (`one` boolean, `two` boolean default '0', `three` boolean default '1', `four` boolean default '1', `five` boolean default '0')",
@@ -1302,6 +1476,22 @@ describe('Schema (misc)', () => {
                 'create index "10_test_table_logins_index" on "10_test_table" ("logins")',
               ]);
             }));
+
+        it('test boolean type with sqlite3 and better sqlite3 #4955', async function () {
+          if (!isSQLite(knex)) {
+            this.skip();
+          }
+          await knex.schema
+            .dropTableIfExists('test')
+            .createTable('test', (table) => {
+              table.boolean('value').notNullable();
+            });
+
+          await knex('test').insert([{ value: true }, { value: false }]);
+          const data = await knex('test').select();
+          expect(data[0].value).to.eq(1);
+          expect(data[1].value).to.eq(0);
+        });
       });
 
       describe('table', () => {
@@ -1469,10 +1659,47 @@ describe('Schema (misc)', () => {
             expect(results).to.not.be.empty;
           });
         });
+
+        describe('supports partial unique indexes - postgres, sqlite, and mssql', function () {
+          it('allows creating a unique index with predicate', async function () {
+            if (!(isPostgreSQL(knex) || isMssql(knex) || isSQLite(knex))) {
+              return this.skip();
+            }
+
+            await knex.schema.table('test_table_one', function (t) {
+              t.unique('email', {
+                indexName: 'email_idx',
+                predicate: knex.whereNotNull('email'),
+              });
+            });
+          });
+
+          it('actually stores the predicate in the Postgres server', async function () {
+            if (!isPostgreSQL(knex)) {
+              return this.skip();
+            }
+            await knex.schema.table('test_table_one', function (t) {
+              t.unique('email', {
+                indexName: 'email_idx_2',
+                predicate: knex.whereNotNull('email'),
+              });
+            });
+            const results = await knex
+              .from('pg_class')
+              .innerJoin('pg_index', 'pg_index.indexrelid', 'pg_class.oid')
+              .where({
+                relname: 'email_idx_2',
+                indisvalid: true,
+                indisunique: true,
+              })
+              .whereNotNull('indpred');
+            expect(results).to.not.be.empty;
+          });
+        });
       });
 
       describe('hasTable', () => {
-        it('checks whether a table exists', () =>
+        it('should be true if a table exists', () =>
           knex.schema.hasTable('test_table_two').then((resp) => {
             expect(resp).to.equal(true);
           }));
@@ -1486,6 +1713,34 @@ describe('Schema (misc)', () => {
           knex.schema.hasTable('').then((resp) => {
             expect(resp).to.equal(false);
           }));
+
+        describe('sqlite only', () => {
+          it('should not parse table name if wrapIdentifier is not specified', async function () {
+            if (!isSQLite(knex)) {
+              return this.skip();
+            }
+
+            knex.client.config.wrapIdentifier = null;
+
+            const resp = await knex.schema.hasTable('testTableTwo');
+            expect(resp).to.be.false;
+          });
+
+          it('should parse table name if wrapIdentifier is specified', async function () {
+            if (!isSQLite(knex)) {
+              return this.skip();
+            }
+
+            knex.client.config.wrapIdentifier = (
+              value,
+              origImpl,
+              queryContext
+            ) => origImpl(_.snakeCase(value));
+
+            const resp = await knex.schema.hasTable('testTableTwo');
+            expect(resp).to.be.true;
+          });
+        });
       });
 
       describe('renameTable', () => {
@@ -1508,12 +1763,12 @@ describe('Schema (misc)', () => {
               expect(exists).to.equal(true);
             }));
 
-          describe('sqlite only', () => {
-            if (!isSQLite(knex)) {
-              return Promise.resolve();
-            }
+          describe('sqlite and mysql only', () => {
+            it('checks whether a column exists without being case sensitive, resolving with a boolean', async function () {
+              if (!isSQLite(knex) && !isMysql(knex)) {
+                return this.skip();
+              }
 
-            it('checks whether a column exists without being case sensitive, resolving with a boolean', async () => {
               const exists = await knex.schema.hasColumn(
                 'accounts',
                 'FIRST_NAME'
@@ -1526,10 +1781,6 @@ describe('Schema (misc)', () => {
 
         describe('using processorss', () => {
           describe('sqlite and pg only', () => {
-            if (!isSQLite(knex) && !isPgBased(knex)) {
-              return Promise.resolve();
-            }
-
             beforeEach(() => {
               knex.client.config.postProcessResponse = postProcessResponse;
               knex.client.config.wrapIdentifier = wrapIdentifier;
@@ -1540,46 +1791,60 @@ describe('Schema (misc)', () => {
               knex.client.config.wrapIdentifier = null;
             });
 
-            it('checks whether a column exists, resolving with a boolean', () =>
-              knex.schema.hasColumn('accounts', 'firstName').then((exists) => {
-                expect(exists).to.equal(false);
-              }));
+            it('checks whether a column exists, resolving with a boolean', async function () {
+              if (!isSQLite(knex) && !isPgBased(knex)) {
+                return this.skip();
+              }
+
+              const exists = await knex.schema.hasColumn(
+                'accounts',
+                'firstName'
+              );
+              expect(exists).to.equal(false);
+            });
           });
         });
       });
 
       describe('addColumn', () => {
         describe('mysql only', () => {
-          if (!isMysql(knex)) {
-            return Promise.resolve(true);
-          }
-
-          before(() =>
-            knex.schema
-              .createTable('add_column_test_mysql', (tbl) => {
-                tbl.integer('field_foo');
-                tbl.integer('field_bar');
-              })
-              .then(() =>
-                knex.schema.alterTable('add_column_test_mysql', (tbl) => {
-                  tbl.integer('field_foo').comment('foo').alter();
-                  tbl.integer('field_bar').comment('bar').alter();
-                  tbl.integer('field_first').first().comment('First');
-                  tbl
-                    .integer('field_after_foo')
-                    .after('field_foo')
-                    .comment('After');
-                  tbl
-                    .increments('field_nondefault_increments')
-                    .comment('Comment on increment col');
+          before(() => {
+            if (isMysql(knex)) {
+              return knex.schema
+                .dropTableIfExists('add_column_test_mysql')
+                .createTable('add_column_test_mysql', (tbl) => {
+                  tbl.integer('field_foo');
+                  tbl.integer('field_bar');
                 })
-              )
-          );
+                .then(() =>
+                  knex.schema.alterTable('add_column_test_mysql', (tbl) => {
+                    tbl.integer('field_foo').comment('foo').alter();
+                    tbl.integer('field_bar').comment('bar').alter();
+                    tbl.integer('field_first').first().comment('First');
+                    tbl
+                      .integer('field_after_foo')
+                      .after('field_foo')
+                      .comment('After');
+                    tbl
+                      .increments('field_nondefault_increments')
+                      .comment('Comment on increment col');
+                  })
+                );
+            }
+          });
 
-          after(() => knex.schema.dropTable('add_column_test_mysql'));
+          after(() => {
+            if (isMysql(knex)) {
+              knex.schema.dropTable('add_column_test_mysql');
+            }
+          });
 
-          it('should columns order be correctly with after and first', () =>
-            knex
+          it('should columns order be correctly with after and first', function () {
+            if (!isMysql(knex)) {
+              return this.skip();
+            }
+
+            return knex
               .raw('SHOW CREATE TABLE `add_column_test_mysql`')
               .then((schema) => {
                 // .columnInfo() keys does not guaranteed fields order.
@@ -1609,7 +1874,8 @@ describe('Schema (misc)', () => {
                 expect(comments[2]).to.equal('After');
                 expect(comments[3]).to.equal('bar');
                 expect(comments[4]).to.equal('Comment on increment col');
-              }));
+              });
+          });
         });
       });
 
@@ -1728,6 +1994,15 @@ describe('Schema (misc)', () => {
               );
 
               const autoinc = !!res.rows[0].ident;
+              expect(autoinc).to.equal(true);
+            } else if (isBetterSQLite3(knex)) {
+              const res = await knex.raw(
+                `SELECT 'is-autoincrement' as ident
+                       FROM sqlite_master
+                       WHERE tbl_name = ? AND sql LIKE '%AUTOINCREMENT%'`,
+                [tableName]
+              );
+              const autoinc = !!res[0].ident;
               expect(autoinc).to.equal(true);
             } else if (isSQLite(knex)) {
               const res = await knex.raw(
@@ -1873,7 +2148,7 @@ describe('Schema (misc)', () => {
 
       describe('withSchema', () => {
         describe('mssql only', () => {
-          if (!knex || !knex.client || !/mssql/i.test(knex.client.dialect)) {
+          if (!isMssql(knex)) {
             return Promise.resolve(true);
           }
 
@@ -1912,15 +2187,23 @@ describe('Schema (misc)', () => {
           }
 
           const defaultSchemaName = 'public';
-          const testSchemaName = 'test';
+          const testSchemaName = 'test_schema';
 
           before(() => createSchema(testSchemaName));
 
+          afterEach(() =>
+            knex.schema.withSchema(testSchemaName).dropTableIfExists('test')
+          );
           after(() => knex.schema.raw('DROP SCHEMA ' + testSchemaName));
 
           it('should not find non-existent tables', () =>
             checkTable(testSchemaName, 'test', false).then(() =>
               checkTable(defaultSchemaName, 'test', false)
+            ));
+
+          it('should find existent tables', () =>
+            createTable(testSchemaName, 'test').then(() =>
+              checkTable(testSchemaName, 'test', true)
             ));
 
           it('should create and drop tables', () =>
@@ -1991,10 +2274,10 @@ describe('Schema (misc)', () => {
         });
       });
 
-      it('should warn attempting to create primary from nonexistent columns', () => {
+      it('should warn attempting to create primary from nonexistent columns', function () {
         // Redshift only
         if (!isRedshift(knex)) {
-          return Promise.resolve(true);
+          return this.skip();
         }
         const tableName = 'no_test_column';
         const constraintName = 'testconstraintname';
@@ -2027,9 +2310,9 @@ describe('Schema (misc)', () => {
       });
 
       //Unit tests checks SQL -- This will test running those queries, no hard assertions here.
-      it('#1430 - .primary() & .dropPrimary() same for all dialects', async () => {
+      it('#1430 - .primary() & .dropPrimary() same for all dialects', async function () {
         if (isSQLite(knex)) {
-          return Promise.resolve();
+          return this.skip();
         }
         const constraintName = 'testconstraintname';
         const tableName = 'primarytest';
@@ -2052,9 +2335,6 @@ describe('Schema (misc)', () => {
         describe('sqlite3 only', () => {
           const tableName = 'invalid_field_test_sqlite3';
           const fieldName = 'field_foo';
-          if (!isSQLite(knex)) {
-            return Promise.resolve();
-          }
 
           before(() =>
             knex.schema.createTable(tableName, (tbl) => {
@@ -2064,16 +2344,25 @@ describe('Schema (misc)', () => {
 
           after(() => knex.schema.dropTable(tableName));
 
-          it('should return empty resultset when referencing an existent column', () =>
-            knex(tableName)
+          it('should return empty resultset when referencing an existent column', function () {
+            if (!isSQLite(knex)) {
+              return this.skip();
+            }
+
+            return knex(tableName)
               .select()
               .where(fieldName, 'something')
               .then((rows) => {
                 expect(rows.length).to.equal(0);
-              }));
+              });
+          });
 
-          it('should throw when referencing a non-existent column', () =>
-            knex(tableName)
+          it('should throw when referencing a non-existent column', function () {
+            if (!isSQLite(knex)) {
+              return this.skip();
+            }
+
+            return knex(tableName)
               .select()
               .where(fieldName + 'foo', 'something')
               .then(() => {
@@ -2081,9 +2370,46 @@ describe('Schema (misc)', () => {
               })
               .catch((err) => {
                 expect(err.code).to.equal('SQLITE_ERROR');
-              }));
+              });
+          });
         });
       });
+
+      describe('sqlite ddl', () => {
+        before(async () => {
+          if (!isSQLite(knex)) {
+            return;
+          }
+
+          await knex.schema.createTable('CREATE TABLE', (table) => {
+            table.primary();
+            table.integer('alter_column');
+          });
+
+          await knex('CREATE TABLE').insert({ alter_column: 1 });
+        });
+
+        after(async () => {
+          if (!isSQLite(knex)) {
+            return;
+          }
+
+          await knex.schema.dropTable('CREATE TABLE');
+        });
+
+        it('properly executes any ddl command when the table name is a substring of "CREATE TABLE"', async () => {
+          if (!isSQLite(knex)) {
+            return;
+          }
+
+          await expect(
+            knex.schema.alterTable('CREATE TABLE', (table) => {
+              table.string('alter_column').alter();
+            })
+          ).to.not.be.eventually.rejected;
+        });
+      });
+
       it('supports named primary keys', async () => {
         const constraintName = 'pk-test';
         const tableName = 'namedpk';

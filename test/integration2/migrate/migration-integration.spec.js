@@ -25,6 +25,9 @@ const {
 } = require('../../util/db-helpers');
 const { assertNumber } = require('../../util/assertHelper');
 const { getAllDbs, getKnexForDb } = require('../util/knex-instance-provider');
+const {
+  ensureTable,
+} = require('../../../lib/migrations/migrate/table-creator');
 
 describe('Migrations', function () {
   getAllDbs().forEach((db) => {
@@ -111,6 +114,31 @@ describe('Migrations', function () {
             await db.migrate.latest();
             await db.migrate.rollback();
             await knexInstance.destroy();
+          });
+
+          it('should not fail alter-table-ignore-case-sensitive', async () => {
+            await knex.migrate.latest({
+              directory:
+                'test/integration2/migrate/alter-table-ignore-case-sensitive',
+            });
+            expect(await knex.schema.hasColumn('Some_Table', 'id')).to.be.true;
+            expect(await knex.schema.hasColumn('Some_Table', 'other_id')).to.be
+              .true;
+            expect(await knex.schema.hasColumn('Some_Table', 'name')).to.be
+              .true;
+            // try different case
+            expect(await knex.schema.hasColumn('some_table', 'id')).to.be.true;
+            expect(await knex.schema.hasColumn('some_table', 'other_id')).to.be
+              .true;
+            expect(await knex.schema.hasColumn('some_table', 'name')).to.be
+              .true;
+
+            await knex.migrate.rollback({
+              directory:
+                'test/integration2/migrate/alter-table-ignore-case-sensitive',
+            });
+            expect(await knex.schema.hasTable('Some_Table')).to.be.false;
+            expect(await knex.schema.hasTable('some_table')).to.be.false;
           });
         }
 
@@ -244,9 +272,18 @@ describe('Migrations', function () {
                     .del();
                 }
                 return knex('knex_migrations')
-                  .where('id', migration1[0])
-                  .orWhere('id', migration2[0])
-                  .orWhere('id', migration3[0])
+                  .where(
+                    'id',
+                    !isNaN(migration1[0]) ? migration1[0] : migration1[0].id
+                  )
+                  .orWhere(
+                    'id',
+                    !isNaN(migration2[0]) ? migration2[0] : migration2[0].id
+                  )
+                  .orWhere(
+                    'id',
+                    !isNaN(migration3[0]) ? migration3[0] : migration3[0].id
+                  )
                   .del();
               });
           });
@@ -820,6 +857,68 @@ describe('Migrations', function () {
           });
         });
 
+        describe('knex.migrate.list', () => {
+          const availableMigrations = [
+            '20131019235242_migration_1.js',
+            '20131019235306_migration_2.js',
+          ];
+
+          const knexConfig = {
+            directory: ['test/integration2/migrate/test'],
+          };
+
+          beforeEach(async () => {
+            await knex.migrate.rollback(knexConfig, true);
+          });
+
+          describe('should list pending and completed migrations', () => {
+            it('as an array of arrays of pending and completed migrations', async () => {
+              const listedMigrations = await knex.migrate.list(knexConfig);
+              expect(listedMigrations).to.have.lengthOf(2);
+              expect(listedMigrations[0]).to.be.an.instanceof(Array);
+              expect(listedMigrations[1]).to.be.an.instanceof(Array);
+            });
+
+            it('in the right quantity', async () => {
+              let [completed, pending] = await knex.migrate.list(knexConfig);
+
+              expect(completed).to.have.lengthOf(0);
+              expect(pending).to.have.lengthOf(2);
+
+              await knex.migrate.latest(knexConfig);
+
+              [completed, pending] = await knex.migrate.list(knexConfig);
+
+              expect(completed).to.have.lengthOf(2);
+              expect(pending).to.have.lengthOf(0);
+            });
+
+            it('with the right object structure for pending migrations', async () => {
+              const [completed, pending] = await knex.migrate.list(knexConfig);
+
+              expect(completed).to.deep.equal([]);
+              expect(pending).to.deep.equal(
+                availableMigrations.map((migration) => ({
+                  file: migration,
+                  directory: knexConfig.directory[0],
+                }))
+              );
+            });
+
+            it('with the right object structure for completed migrations', async () => {
+              await knex.migrate.latest(knexConfig);
+              const [completed, pending] = await knex.migrate.list(knexConfig);
+
+              expect(completed).to.deep.equal(
+                availableMigrations.map((migration) => ({
+                  name: migration,
+                }))
+              );
+              expect(pending).to.deep.equal([]);
+            });
+          });
+        });
+
         after(function () {
           rimraf.sync(path.join(__dirname, './migration'));
         });
@@ -851,7 +950,22 @@ describe('Migrations', function () {
           });
         }
 
-        it('is not able to run two migrations in parallel when transactions are disabled', function () {
+        /** TODO : fix me and enabled it.
+         * Fail randomly with (mostly with PostgreSQL, PgNative, CockroachDb):
+         *  knex.migrate.latest in parallel
+         *    is not able to run two migrations in parallel when transactions are disabled:
+
+         *    AssertionError: expected false to equal true
+         *    + expected - actual
+
+         *    -false
+         *    +true
+
+         *    at /home/runner/work/knex/knex/test/integration2/migrate/migration-integration.spec.js:944:37
+         *    at runMicrotasks (<anonymous>)
+         *    at processTicksAndRejections (internal/process/task_queues.js:95:5)
+         */
+        it.skip('is not able to run two migrations in parallel when transactions are disabled', function () {
           const migrations = [
             knex.migrate
               .latest({
@@ -1241,6 +1355,35 @@ describe('Migrations', function () {
               directory: 'test/integration2/migrate/test',
             });
           }
+        });
+      });
+
+      describe('Test lock row', async () => {
+        beforeEach(async () => {
+          await knex.schema.dropTableIfExists('test_lock');
+        });
+
+        it('should insert is_locked value to 1 if lock table not exists', async () => {
+          const result = await ensureTable('test', undefined, knex);
+
+          expect(!!(result || result.length)).is.true;
+          const data = await knex('test_lock').select('*');
+          expect(data[0]).to.have.property('is_locked');
+          expect(Number.parseInt(data[0].is_locked)).to.not.be.ok;
+        });
+
+        it('should is_locked value still be 1 if row already exists', async () => {
+          await knex.schema.createTable('test_lock', (t) => {
+            t.increments('index').primary();
+            t.integer('is_locked');
+          });
+          await knex('test_lock').insert({ is_locked: 1 });
+
+          const result = await ensureTable('test', undefined, knex);
+          expect(result).to.false;
+          const data = await knex('test_lock').select('*');
+          expect(data[0]).to.have.property('is_locked');
+          expect(Number.parseInt(data[0].is_locked)).to.be.ok;
         });
       });
     });

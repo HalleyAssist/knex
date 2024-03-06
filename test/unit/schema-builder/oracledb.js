@@ -5,7 +5,8 @@ const { expect } = require('chai');
 const sinon = require('sinon');
 const Oracle_Client = require('../../../lib/dialects/oracledb');
 const knex = require('../../../knex');
-const client = new Oracle_Client({ client: 'oracledb' });
+const FunctionHelper = require('../../../lib/knex-builder/FunctionHelper');
+const client = new Oracle_Client({ client: 'oracledb', version: '18.0' });
 
 describe('OracleDb SchemaBuilder', function () {
   let tableSql;
@@ -35,12 +36,30 @@ describe('OracleDb SchemaBuilder', function () {
     );
   });
 
+  it('test create table like with additionnal columns', function () {
+    tableSql = client
+      .schemaBuilder()
+      .createTableLike('users_like', 'users', function (table) {
+        table.text('add_col');
+        table.integer('add_num_col');
+      });
+
+    expect(tableSql.toSQL().length).to.equal(2);
+    expect(tableSql.toSQL()[0].sql).to.equal(
+      'create table "users_like" as (select * from "users" where 0=1)'
+    );
+    expect(tableSql.toSQL()[1].sql).to.equal(
+      'alter table "users_like" add ("add_col" clob, "add_num_col" integer)'
+    );
+  });
+
   describe('views', function () {
     let knexOracleDb;
 
     before(function () {
       knexOracleDb = knex({
         client: 'oracledb',
+        version: '18.0',
         connection: {},
       });
     });
@@ -59,6 +78,19 @@ describe('OracleDb SchemaBuilder', function () {
       );
     });
 
+    it('basic create view without columns', async function () {
+      const viewSql = client
+        .schemaBuilder()
+        .createView('adults', function (view) {
+          view.as(knexOracleDb('users').select('name').where('age', '>', '18'));
+        })
+        .toSQL();
+      equal(1, viewSql.length);
+      expect(viewSql[0].sql).to.equal(
+        'create view "adults" as select "name" from "users" where "age" > \'18\''
+      );
+    });
+
     it('create view or replace', async function () {
       const viewSql = client
         .schemaBuilder()
@@ -67,9 +99,22 @@ describe('OracleDb SchemaBuilder', function () {
           view.as(knexOracleDb('users').select('name').where('age', '>', '18'));
         })
         .toSQL();
-      equal(1, viewSql.length);
+      expect(viewSql.length).to.equal(1);
       expect(viewSql[0].sql).to.equal(
-        'create view or replace "adults" ("name") as select "name" from "users" where "age" > \'18\''
+        'create or replace view "adults" ("name") as select "name" from "users" where "age" > \'18\''
+      );
+    });
+
+    it('create view or replace without columns', async function () {
+      const viewSql = client
+        .schemaBuilder()
+        .createViewOrReplace('adults', function (view) {
+          view.as(knexOracleDb('users').select('name').where('age', '>', '18'));
+        })
+        .toSQL();
+      expect(viewSql.length).to.equal(1);
+      expect(viewSql[0].sql).to.equal(
+        'create or replace view "adults" as select "name" from "users" where "age" > \'18\''
       );
     });
 
@@ -82,7 +127,7 @@ describe('OracleDb SchemaBuilder', function () {
           view.checkOption();
         })
         .toSQL();
-      equal(1, tableSql.length);
+      expect(tableSql.length).to.equal(1);
       expect(tableSql[0].sql).to.equal(
         'create view "adults" ("name") as select "name" from "users" where "age" > \'18\' with check option'
       );
@@ -981,6 +1026,37 @@ describe('OracleDb SchemaBuilder', function () {
     );
   });
 
+  it('adding uuid', function () {
+    tableSql = client
+      .schemaBuilder()
+      .table('users', function (table) {
+        table.uuid('foo');
+      })
+      .toSQL();
+
+    expect(tableSql.length).to.equal(1);
+    expect(tableSql[0].sql).to.equal('alter table "users" add "foo" char(36)');
+  });
+
+  it('adding binary uuid', function () {
+    tableSql = client
+      .schemaBuilder()
+      .table('users', function (table) {
+        table.uuid('foo', { useBinaryUuid: true });
+      })
+      .toSQL();
+
+    expect(tableSql.length).to.equal(1);
+    expect(tableSql[0].sql).to.equal('alter table "users" add "foo" raw(16)');
+  });
+
+  it('should allow using .fn.uuid to create raw statements', function () {
+    // Integration tests doesnt cover for oracle
+    const helperFunctions = new FunctionHelper(client);
+
+    expect(helperFunctions.uuid().toQuery()).to.equal('(random_uuid())');
+  });
+
   it('test set comment', function () {
     tableSql = client
       .schemaBuilder()
@@ -1029,6 +1105,30 @@ describe('OracleDb SchemaBuilder', function () {
     }).to.throw(TypeError);
   });
 
+  it('allows adding default json objects when the column is json', function () {
+    tableSql = client
+      .schemaBuilder()
+      .table('user', function (t) {
+        t.json('preferences').defaultTo({}).notNullable();
+      })
+      .toSQL();
+    expect(tableSql[0].sql).to.equal(
+      'alter table "user" add "preferences" varchar2(4000) default \'{}\' not null check ("preferences" is json)'
+    );
+  });
+
+  it('allows adding default jsonb objects when the column is json', function () {
+    tableSql = client
+      .schemaBuilder()
+      .table('user', function (t) {
+        t.jsonb('preferences').defaultTo({}).notNullable();
+      })
+      .toSQL();
+    expect(tableSql[0].sql).to.equal(
+      'alter table "user" add "preferences" varchar2(4000) default \'{}\' not null check ("preferences" is json)'
+    );
+  });
+
   it('is possible to set raw statements in defaultTo, #146', function () {
     tableSql = client
       .schemaBuilder()
@@ -1044,7 +1144,7 @@ describe('OracleDb SchemaBuilder', function () {
   });
 
   it('allows dropping a unique compound index with too long generated name', function () {
-    tableSql = client
+    tableSql = new Oracle_Client({ client: 'oracledb', version: '12.0' })
       .schemaBuilder()
       .table('composite_key_test', function (t) {
         t.dropUnique(['column_a', 'column_b']);
@@ -1185,5 +1285,130 @@ describe('OracleDb SchemaBuilder', function () {
     expect(tableSql.toQuery()).to.equal(
       'begin execute immediate \'drop table "book"\'; exception when others then if sqlcode != -942 then raise; end if; end;\nbegin execute immediate \'drop sequence "book_seq"\'; exception when others then if sqlcode != -2289 then raise; end if; end;'
     );
+  });
+
+  describe('Checks tests', function () {
+    it('allows adding checks positive', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.integer('price').checkPositive();
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "price" integer check ("price" > 0)'
+      );
+    });
+
+    it('allows adding checks negative', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.integer('price').checkNegative();
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "price" integer check ("price" < 0)'
+      );
+    });
+
+    it('allows adding checks in', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.string('animal').checkIn(['cat', 'dog']);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "animal" varchar2(255) check ("animal" in (\'cat\', \'dog\'))'
+      );
+    });
+
+    it('allows adding checks not in', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.string('animal').checkNotIn(['cat', 'dog']);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "animal" varchar2(255) check ("animal" not in (\'cat\',\'dog\'))'
+      );
+    });
+
+    it('allows adding checks between', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.integer('price').checkBetween([10, 15]);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "price" integer check ("price" between 10 and 15)'
+      );
+    });
+
+    it('allows adding checks between with multiple intervals', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.integer('price').checkBetween([
+            [10, 15],
+            [20, 25],
+          ]);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "price" integer check ("price" between 10 and 15 or "price" between 20 and 25)'
+      );
+    });
+
+    it('allows adding checks between strings', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.integer('price').checkBetween(['banana', 'orange']);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "price" integer check ("price" between \'banana\' and \'orange\')'
+      );
+    });
+
+    it('allows length equals', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.varchar('phone').checkLength('=', 8);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "phone" varchar2(255) check (length("phone") = 8)'
+      );
+    });
+
+    it('check regexp', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.varchar('phone').checkRegex('[0-9]{8}');
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" add "phone" varchar2(255) check (REGEXP_LIKE("phone",\'[0-9]{8}\'))'
+      );
+    });
+
+    it('drop checks', function () {
+      tableSql = client
+        .schemaBuilder()
+        .table('user', function (t) {
+          t.dropChecks(['check_constraint1', 'check_constraint2']);
+        })
+        .toSQL();
+      expect(tableSql[0].sql).to.equal(
+        'alter table "user" drop constraint check_constraint1, drop constraint check_constraint2'
+      );
+    });
   });
 });

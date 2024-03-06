@@ -4,7 +4,7 @@ const { expect } = require('chai');
 
 const sinon = require('sinon');
 const Oracle_Client = require('../../../lib/dialects/oracle');
-const client = new Oracle_Client({ client: 'oracledb' });
+const client = new Oracle_Client({ client: 'oracledb', version: '18.0' });
 
 describe('Oracle SchemaBuilder', function () {
   let tableSql;
@@ -76,7 +76,7 @@ describe('Oracle SchemaBuilder', function () {
         table.increments('id', { primaryKey: false });
       });
 
-    equal(2, tableSql.toSQL().length);
+    expect(tableSql.toSQL().length).to.equal(2);
     expect(tableSql.toSQL()[0].sql).to.equal(
       'begin execute immediate \'create table "users" ("id" integer not null)\'; exception when others then if sqlcode != -955 then raise; end if; end;'
     );
@@ -931,7 +931,7 @@ describe('Oracle SchemaBuilder', function () {
   });
 
   it('allows dropping a unique compound index with too long generated name', function () {
-    tableSql = client
+    tableSql = new Oracle_Client({ client: 'oracledb', version: '12.0' })
       .schemaBuilder()
       .table('composite_key_test', function (t) {
         t.dropUnique(['column_a', 'column_b']);
