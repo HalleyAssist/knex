@@ -77,29 +77,6 @@
     "tarn": "^3.0.2",
     "tildify": "2.0.0"
   },
-  "peerDependenciesMeta": {
-    "tedious": {
-      "optional": true
-    },
-    "mysql": {
-      "optional": true
-    },
-    "mysql2": {
-      "optional": true
-    },
-    "pg": {
-      "optional": true
-    },
-    "pg-native": {
-      "optional": true
-    },
-    "sqlite3": {
-      "optional": true
-    },
-    "better-sqlite3": {
-      "optional": true
-    }
-  },
   "lint-staged": {
     "*": "prettier --ignore-unknown --write",
     "*.js": "eslint --cache --fix"
@@ -107,7 +84,6 @@
   "devDependencies": {
     "@tsconfig/recommended": "^1.0.1",
     "@types/node": "^20.4.0",
-    "better-sqlite3": "^9.1.1",
     "chai": "^4.3.6",
     "chai-as-promised": "^7.1.1",
     "chai-subset-in-order": "^3.1.0",
@@ -126,10 +102,7 @@
     "lint-staged": "^13.0.0",
     "mocha": "^10.0.0",
     "mock-fs": "^5.1.4",
-    "mysql": "^2.18.1",
-    "mysql2": "^3.2.0",
     "nyc": "^15.1.0",
-    "oracledb": "^6.1.0",
     "pg": "^8.8.0",
     "pg-query-stream": "^4.2.4",
     "prettier": "2.8.7",
@@ -137,7 +110,6 @@
     "sinon": "^15.0.1",
     "sinon-chai": "^3.7.0",
     "source-map-support": "^0.5.21",
-    "sqlite3": "^5.0.11",
     "tap-spec": "^5.0.0",
     "tape": "^5.6.0",
     "tedious": "^16.6.1",
@@ -200,21 +172,6 @@
       "web": "https://briandamaged.org"
     }
   ],
-  "browser": {
-    "./lib/migrations/migrate/Migrator.js": "./lib/util/noop.js",
-    "./lib/bin/cli.js": "./lib/util/noop.js",
-    "./lib/migrations/seed/Seeder.js": "./lib/util/noop.js",
-    "tedious": false,
-    "mysql": false,
-    "mysql2": false,
-    "pg": false,
-    "pg-native": false,
-    "pg-query-stream": false,
-    "oracle": false,
-    "sqlite3": false,
-    "better-sqlite3": false,
-    "oracledb": false
-  },
   "react-native": {
     "./lib/migrate": "./lib/util/noop.js",
     "./lib/seed": "./lib/util/noop.js"
