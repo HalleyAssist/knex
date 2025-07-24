@@ -2,7 +2,7 @@ const { resolveClientNameWithAliases } = require('../util/helpers');
 
 const dbNameToDialectLoader: Record<string, () => any> = Object.freeze({
   postgres: () => require('./postgres'),
-  sqlite3: () => require('./sqlite3')
+  sqlite3: () => require('./sqlite3'),
 });
 
 /**
