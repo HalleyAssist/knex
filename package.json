@@ -121,9 +121,6 @@
   "buildDependencies": [
     "rimraf"
   ],
-  "bin": {
-    "knex": "./bin/cli.js"
-  },
   "repository": {
     "type": "git",
     "url": "git://github.com/knex/knex.git"
